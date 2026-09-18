@@ -43,21 +43,6 @@ func ExampleEventsService_List() {
 	}
 }
 
-// Identification answers before the event is archived, so poll only when you
-// have just identified a visitor.
-func ExampleEventsService_WaitFor() {
-	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
-
-	event, err := client.Events.WaitFor(context.Background(), "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4",
-		fingerly.WithWaitTimeout(10*time.Second),
-		fingerly.WithPollInterval(250*time.Millisecond),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(event.RequestID)
-}
-
 // Decide on the server's verdict, never on a score the browser supplied.
 func ExampleAPIError() {
 	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))

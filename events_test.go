@@ -130,71 +130,48 @@ func TestListSendsWindowBoundsInUTC(t *testing.T) {
 	}
 }
 
-func TestWaitForPollsThroughStructuredMisses(t *testing.T) {
+// An event is readable as soon as identification answers, so a missing one
+// means a request id that was never issued. It is reported at once, in one
+// request, rather than waited through.
+func TestGetReportsAMissingEventWithoutRetrying(t *testing.T) {
 	var calls int
 	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if calls < 3 {
-			respondJSON(http.StatusNotFound, errorBody("event_not_found", 404))(w, r)
-			return
-		}
-		respondJSON(http.StatusOK, eventBody(nil))(w, r)
+		respondJSON(http.StatusNotFound, errorBody("event_not_found", 404))(w, r)
 	})
 
-	event, err := testClient(rec).Events.WaitFor(
-		context.Background(), testRequestID, WithPollInterval(time.Millisecond),
-	)
-	if err != nil {
-		t.Fatalf("WaitFor: %v", err)
-	}
-	if event.RequestID != testRequestID {
-		t.Errorf("request id is %q", event.RequestID)
-	}
-	if calls != 3 {
-		t.Errorf("polled %d times, want 3", calls)
-	}
-}
-
-func TestWaitForBoundsAPermanentlyMissingEvent(t *testing.T) {
-	rec := newRecorder(t, respondJSON(http.StatusNotFound, errorBody("event_not_found", 404)))
-	_, err := testClient(rec).Events.WaitFor(
-		context.Background(), testRequestID,
-		WithWaitTimeout(60*time.Millisecond), WithPollInterval(10*time.Millisecond),
-	)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error is %v, want a deadline", err)
-	}
-	// The reason it gave up is still reachable.
+	_, err := testClient(rec).Events.Get(context.Background(), testRequestID)
 	if !errors.Is(err, ErrEventNotFound) {
-		t.Error("the timeout should still report why it kept waiting")
+		t.Fatalf("error is %v, want ErrEventNotFound", err)
+	}
+	if calls != 1 {
+		t.Errorf("made %d requests, want 1", calls)
 	}
 }
 
-func TestWaitForDoesNotRetryOtherFailures(t *testing.T) {
+func TestGetPropagatesEveryOtherFailure(t *testing.T) {
 	for _, status := range []int{400, 401, 403, 429, 500} {
 		var calls int
 		rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
 			calls++
 			respondJSON(status, errorBody("other", status))(w, r)
 		})
-		_, err := testClient(rec).Events.WaitFor(
-			context.Background(), testRequestID, WithPollInterval(time.Millisecond),
-		)
+		_, err := testClient(rec).Events.Get(context.Background(), testRequestID)
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) || apiErr.Status != status {
 			t.Errorf("status %d: error is %v", status, err)
 		}
 		if calls != 1 {
-			t.Errorf("status %d: polled %d times, want 1", status, calls)
+			t.Errorf("status %d: made %d requests, want 1", status, calls)
 		}
 	}
 }
 
-func TestWaitForStopsWhenTheCallerCancels(t *testing.T) {
-	var calls int
+// A cancelled context stops the read, rather than the read outliving the
+// caller that asked for it.
+func TestGetStopsWhenTheCallerCancels(t *testing.T) {
 	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		respondJSON(http.StatusNotFound, errorBody("event_not_found", 404))(w, r)
+		<-r.Context().Done()
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -203,33 +180,10 @@ func TestWaitForStopsWhenTheCallerCancels(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := testClient(rec).Events.WaitFor(
-		ctx, testRequestID,
-		WithWaitTimeout(5*time.Second), WithPollInterval(time.Hour),
-	)
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("waited %v despite a long interval", elapsed)
-	}
-	if err == nil {
+	if _, err := testClient(rec).Events.Get(ctx, testRequestID); err == nil {
 		t.Fatal("expected an error")
 	}
-	if calls != 1 {
-		t.Errorf("polled %d times, want 1", calls)
-	}
-}
-
-func TestWaitForRejectsUnusableOptions(t *testing.T) {
-	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(nil)))
-	client := testClient(rec)
-	for name, option := range map[string]WaitOption{
-		"timeout":  WithWaitTimeout(0),
-		"interval": WithPollInterval(-time.Second),
-	} {
-		if _, err := client.Events.WaitFor(context.Background(), testRequestID, option); err == nil {
-			t.Errorf("%s: option was accepted", name)
-		}
-	}
-	if len(rec.requests) != 0 {
-		t.Error("an unusable option still reached the network")
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("the read ran for %v after being cancelled", elapsed)
 	}
 }

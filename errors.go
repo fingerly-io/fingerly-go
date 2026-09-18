@@ -5,8 +5,9 @@ import (
 	"fmt"
 )
 
-// ErrEventNotFound matches the one retryable read failure: the event has not
-// been archived yet. Events.WaitFor polls on exactly this and nothing else.
+// ErrEventNotFound matches a read for an event that does not exist. One is
+// readable as soon as identification answers, so this means a request id that
+// was never issued rather than one that has not landed yet.
 //
 // Compare with errors.Is; the concrete error is always an *APIError.
 var ErrEventNotFound = errors.New("fingerly: event not found")

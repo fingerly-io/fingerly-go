@@ -33,7 +33,7 @@ Every call takes a `context.Context`, and a Go request context governs the
 whole exchange, so the deadline covers reading the response body too. The
 client applies `WithTimeout` (10s by default) on top of whatever the caller's
 context already carries, whichever is sooner. Cancelling the context stops the
-request, and `WaitFor` stops polling.
+request.
 
 ## Errors
 
@@ -71,22 +71,21 @@ if !ok {
 `Event.Raw` and `EventPage.Raw` keep the response body exactly as it arrived,
 so a field the API adds later is reachable without an SDK upgrade.
 
-## Wait for a fresh identification
+## Read an event you just identified
 
-Identification answers before the event is archived, so reach for this only
-when you have just identified a visitor:
+An event is readable as soon as identification answers, so this needs nothing
+special:
 
 ```go
-event, err := client.Events.WaitFor(ctx, requestID,
-	fingerly.WithWaitTimeout(10*time.Second),
-	fingerly.WithPollInterval(250*time.Millisecond),
-)
+event, err := client.Events.Get(ctx, requestID)
 ```
 
-Only `ErrEventNotFound` is retried; every other failure returns at once. When
-the event is still missing at the deadline, the error wraps both
-`context.DeadlineExceeded` and the last `ErrEventNotFound`, so either matches
-with `errors.Is` and the message says why it kept waiting.
+Earlier versions had a `WaitFor` that polled through the gap between
+identification and the event becoming queryable. There is no gap, so
+`ErrEventNotFound` now means a request id that was never issued.
+
+The archived `Document` arrives moments after the event itself, so check
+`HasDocument` rather than assuming it is there.
 
 ## Verify a backend action
 
@@ -193,7 +192,7 @@ secrets in fixtures.
 
 `fingerly.go` holds the `Client` and its options. `transport.go` performs
 authenticated requests and maps failures to `*APIError`. `events.go` owns the
-event reads and the polling loop; `models.go` owns the types they decode into.
+event reads and the list filters; `models.go` owns the types they decode into.
 `webhooks.go` verifies signatures. `proxy.go` is the same-origin handler.
 `config.go` validates every caller-supplied option: keys, origins, API versions
 and durations, all before any network access. `errors.go` holds the error type
