@@ -52,8 +52,8 @@ type clientConfig struct {
 	httpClient *http.Client
 }
 
-// WithEndpoint overrides the regional origin implied by the key, for a local
-// or self-hosted API. The key still decides which kind of key is accepted.
+// WithEndpoint overrides the default API origin, for a local or self-hosted
+// API. The key still decides which kind of key is accepted.
 func WithEndpoint(endpoint string) Option {
 	return func(c *clientConfig) { c.endpoint = endpoint }
 }
@@ -81,8 +81,7 @@ func WithHTTPClient(httpClient *http.Client) Option {
 }
 
 // New builds a client for a server-only secret key,
-// fly_sk_{eu|us}_{environment}_…, whose prefix selects the regional API and
-// the environment read.
+// fly_sk_{environment}_…, whose prefix selects the environment read.
 //
 // New never returns an error, so it composes in a package-level var. An
 // invalid key or option is reported by the first call made on the client,

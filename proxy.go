@@ -258,8 +258,8 @@ func isSupplementPath(resource string) bool {
 
 // upstreamKeyFor decides which key to present upstream.
 //
-// With a proxy key the browser must supply a public key for the same region
-// and environment, which the proxy forwards alongside its own. The deprecated
+// With a proxy key the browser must supply a public key for the same
+// environment, which the proxy forwards alongside its own. The deprecated
 // secret-key mode authenticates on its own.
 func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
 	if !p.usesProxyKey {
