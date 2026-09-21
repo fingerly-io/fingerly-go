@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	testSecretKey = "fly_sk_us_development_test"
+	testSecretKey = "fly_sk_development_test"
 	testRequestID = "0199a963-e400-7000-8000-000000000001"
 )
 
@@ -91,12 +91,12 @@ func testClient(rec *recorder, opts ...Option) *Client {
 func TestNewRejectsUnsupportedKeys(t *testing.T) {
 	for _, secretKey := range []string{
 		"not-a-fingerly-key",
-		"fly_pk_eu_production_test",
-		"fly_px_us_development_test",
-		"fly_mk_us_test",
-		"fly_sk_eu_unknown_test",
-		"fly_sk_us_production_",
-		"fly_sk_us_production_test\n",
+		"fly_pk_production_test",
+		"fly_px_development_test",
+		"fly_mk_test",
+		"fly_sk_unknown_test",
+		"fly_sk_production_",
+		"fly_sk_production_test\n",
 	} {
 		client := New(secretKey, WithEndpoint("https://custom.test"))
 		if _, err := client.Events.Get(context.Background(), "id"); err == nil {
@@ -134,13 +134,10 @@ func TestConfigurationErrorsNeverReachTheNetwork(t *testing.T) {
 	}
 }
 
-func TestRegionalEndpointComesFromTheKey(t *testing.T) {
-	for _, region := range []string{"us", "eu"} {
-		client := New("fly_sk_" + region + "_development_test")
-		want := "https://" + region + ".api.fingerly.io/api/v1"
-		if client.baseURL != want {
-			t.Errorf("region %s: base URL is %q, want %q", region, client.baseURL, want)
-		}
+func TestTheDefaultEndpointIsTheFingerlyAPI(t *testing.T) {
+	client := New(testSecretKey)
+	if want := "https://api.fingerly.io/api/v1"; client.baseURL != want {
+		t.Errorf("base URL is %q, want %q", client.baseURL, want)
 	}
 }
 

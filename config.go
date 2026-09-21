@@ -18,8 +18,11 @@ const (
 // keyPattern is anchored with \A and \z rather than ^ and $, because Go's $
 // also matches before a trailing newline.
 var keyPattern = regexp.MustCompile(
-	`\Afly_(pk|sk|px)_(eu|us)_(production|staging|development)_[A-Za-z0-9_-]+\z`,
+	`\Afly_(pk|sk|px)_(production|staging|development)_[A-Za-z0-9_-]+\z`,
 )
+
+// defaultEndpoint is the one Fingerly API origin.
+const defaultEndpoint = "https://api.fingerly.io"
 
 var apiVersionPattern = regexp.MustCompile(`\Av[1-9][0-9]*\z`)
 
@@ -29,9 +32,8 @@ var keyLabels = map[string]string{
 	keyProxy:  "proxy",
 }
 
-// keyScope is the region and environment a Fingerly key is scoped to.
+// keyScope is the environment a Fingerly key is scoped to.
 type keyScope struct {
-	Region      string // eu or us; selects the regional API host.
 	Environment string // production, staging or development.
 }
 
@@ -44,15 +46,10 @@ func parseKey(key, expected string) (keyScope, error) {
 	match := keyPattern.FindStringSubmatch(key)
 	if match == nil || match[1] != expected {
 		return keyScope{}, fmt.Errorf(
-			"fingerly: a valid regional Fingerly %s key is required", keyLabels[expected],
+			"fingerly: a valid Fingerly %s key is required", keyLabels[expected],
 		)
 	}
-	return keyScope{Region: match[2], Environment: match[3]}, nil
-}
-
-// regionalOrigin returns the Fingerly API origin serving a key's region.
-func regionalOrigin(scope keyScope) string {
-	return "https://" + scope.Region + ".api.fingerly.io"
+	return keyScope{Environment: match[2]}, nil
 }
 
 // normalizeOrigin validates a caller-supplied API origin.

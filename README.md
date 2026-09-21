@@ -18,8 +18,8 @@ event, err := client.Events.Get(ctx, requestID)
 page, err := client.Events.List(ctx, &fingerly.EventListParams{Level: "high", Limit: 50})
 ```
 
-Event reads require `fly_sk_{eu|us}_{production|staging|development}_…` keys.
-The key selects the regional endpoint; `WithEndpoint` overrides it for a local
+Event reads require `fly_sk_{production|staging|development}_…` keys. Requests
+go to `https://api.fingerly.io`; `WithEndpoint` overrides that for a local
 API. Public, proxy, management, malformed and unsupported keys are rejected
 before network access. Requests do not follow redirects. `Get` and `List` each
 perform one request and never retry.
@@ -158,8 +158,8 @@ It forwards only `POST` to `{prefix}/api/v1/identify` and
 any other method gets `405`. Event reads need a secret key and stay unreachable
 from a browser by construction.
 
-The browser must present a public key from the same region and environment as
-the proxy key, or the request gets `401`. Bodies over 1 MiB get `413`.
+The browser must present a public key from the same environment as the proxy
+key, or the request gets `401`. Bodies over 1 MiB get `413`.
 Responses are marked `no-store`. Only the content type, the visitor metadata
 Fingerly needs, and an `Idempotency-Key` are forwarded; customer cookies and
 authorization headers never are.

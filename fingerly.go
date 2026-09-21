@@ -98,16 +98,15 @@ func New(secretKey string, opts ...Option) *Client {
 
 	// Validate the key even when an endpoint is given, so a public, proxy or
 	// management key can never reach an API that would accept it.
-	scope, err := parseKey(secretKey, keySecret)
-	if err != nil {
+	if _, err := parseKey(secretKey, keySecret); err != nil {
 		client.configErr = err
 		return client
 	}
 	origin := config.endpoint
 	if origin == "" {
-		origin = regionalOrigin(scope)
+		origin = defaultEndpoint
 	}
-	origin, err = normalizeOrigin(origin)
+	origin, err := normalizeOrigin(origin)
 	if err != nil {
 		client.configErr = err
 		return client

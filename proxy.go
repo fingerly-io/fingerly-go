@@ -122,7 +122,7 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 
 	upstream := options.Upstream
 	if upstream == "" {
-		upstream = regionalOrigin(scope)
+		upstream = defaultEndpoint
 	}
 	if proxy.upstream, err = normalizeOrigin(upstream); err != nil {
 		return nil, err
@@ -269,7 +269,7 @@ func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if browser.Region != p.scope.Region || browser.Environment != p.scope.Environment {
+	if browser.Environment != p.scope.Environment {
 		return "", false
 	}
 	return presented, true

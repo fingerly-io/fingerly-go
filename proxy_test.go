@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	testProxyKey  = "fly_px_us_development_test"
-	testPublicKey = "fly_pk_us_development_test"
+	testProxyKey  = "fly_px_development_test"
+	testPublicKey = "fly_pk_development_test"
 	identifyPath  = "/metrics/api/v1/identify"
 )
 
@@ -198,11 +198,10 @@ func TestProxyRefusesEveryRouteThatIsNotProxyable(t *testing.T) {
 
 func TestProxyRefusesAPublicKeyFromAnotherDeployment(t *testing.T) {
 	for name, key := range map[string]string{
-		"missing":      "",
-		"other region": "fly_pk_eu_development_test",
-		"other env":    "fly_pk_us_production_test",
-		"secret key":   testSecretKey,
-		"nonsense":     "invalid",
+		"missing":    "",
+		"other env":  "fly_pk_production_test",
+		"secret key": testSecretKey,
+		"nonsense":   "invalid",
 	} {
 		proxy, rec := newProxy(t, nil)
 		headers := browserHeaders()
