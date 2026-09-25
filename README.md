@@ -124,28 +124,31 @@ own site and those requests become first-party. The proxy key is what lets that
 hop declare the visitor's real address, origin and user agent; a public key
 alone never can, so nobody can spoof them.
 
-`Proxy` implements `http.Handler`, so every Go router takes it directly:
+Create a proxy in the dashboard (**Integration > Proxy keys**) and mount the
+handler at the path it issued, here `/k7x2qm4a`. `Proxy` implements
+`http.Handler`, so every Go router takes it directly:
 
 ```go
 proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
 	ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
-	Prefix:   "/metrics",
+	Path:     "/k7x2qm4a",
 	ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
 })
 if err != nil {
 	log.Fatal(err)
 }
 
-mux.Handle("/metrics/", proxy)                            // net/http
-router.PathPrefix("/metrics/").Handler(proxy)             // gorilla/mux
-r.Mount("/metrics", proxy)                                // chi
-router.Any("/metrics/*path", gin.WrapH(proxy))            // gin
+mux.Handle("/k7x2qm4a", proxy)                            // net/http
+router.Handle("/k7x2qm4a", proxy)                         // gorilla/mux
+r.Handle("/k7x2qm4a", proxy)                              // chi
+router.Any("/k7x2qm4a", gin.WrapH(proxy))                 // gin
 ```
 
-Then point the browser SDK at the same path:
+Then point the browser SDK at the same path. It posts both of its calls there,
+exactly as given:
 
 ```ts
-const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/metrics' })
+const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/k7x2qm4a' })
 ```
 
 Unlike `New`, `NewProxy` reports configuration errors immediately: a proxy is
@@ -153,21 +156,28 @@ wired up once at start-up, where an error is natural to handle.
 
 ### What the proxy does
 
-It forwards only `POST` to `{prefix}/api/v1/identify` and
-`{prefix}/api/v1/events/{request_id}/supplement`. Anything else gets `404`, and
-any other method gets `405`. Event reads need a secret key and stay unreachable
-from a browser by construction.
+With `Path` set it answers only that path, matched exactly with trailing
+slashes ignored; anything else gets `404`, including paths under it. `Path` is
+optional: leave it empty when the route already sends only that path to the
+handler, and behind `http.StripPrefix`, which changes the path the handler
+sees. It must be an absolute path such as `/k7x2qm4a`, or `NewProxy` returns
+an error. Only `POST` is forwarded; any other method gets `405`.
+
+Every forwarded request goes to one URL, `https://api.fingerly.io/api/v1/ingest`
+(`APIVersion` and `Upstream` change its version and origin). Event reads need a
+secret key and stay unreachable from a browser by construction.
 
 The browser must present a public key from the same environment as the proxy
-key, or the request gets `401`. Bodies over 1 MiB get `413`.
-Responses are marked `no-store`. Only the content type, the visitor metadata
-Fingerly needs, and an `Idempotency-Key` are forwarded; customer cookies and
-authorization headers never are.
+key, or the request gets `401`. Bodies over 1 MiB get `413`. Only the content
+type, the visitor metadata Fingerly needs, and an `Idempotency-Key` are
+forwarded; customer cookies and authorization headers never are. The proxy
+reports itself upstream as `go/0.1.0`, which the dashboard shows per proxy.
 
-`Prefix` must match where you mount the handler, because the proxy checks the
-whole request path. Mounting behind `http.StripPrefix` also works: the prefix
-is accepted as either present or already stripped. Choose a neutral path.
-Blockers look for words such as `fingerprint`, `tracking` and `fingerly`.
+Responses are marked `no-store`, and the only upstream headers relayed back are
+`Content-Type`, `X-Request-Id`, `RateLimit-Limit`, `RateLimit-Remaining` and
+`Retry-After`, so nothing on the response names Fingerly. Use the path the
+dashboard issued: blockers look for words such as `fingerprint`, `tracking`,
+`analytics` and `fingerly` in the URL.
 
 > **`ClientIP` is the one thing you must get right.** Resolve it from a header
 > your own infrastructure sets, such as your load balancer's or CDN's. Never

@@ -11,16 +11,17 @@ import (
 const (
 	testProxyKey  = "fly_px_development_test"
 	testPublicKey = "fly_pk_development_test"
-	identifyPath  = "/metrics/api/v1/identify"
+	proxyPath     = "/k7x2qm4a"
+	ingestPath    = "/api/v1/ingest"
 )
 
-// newProxy builds a proxy mounted at /metrics whose upstream is a recorder.
+// newProxy builds a proxy answering proxyPath whose upstream is a recorder.
 func newProxy(t *testing.T, apply func(*ProxyOptions)) (*Proxy, *recorder) {
 	t.Helper()
 	rec := newRecorder(t, respondJSON(http.StatusOK, map[string]any{"request_id": "identified"}))
 	options := ProxyOptions{
 		ProxyKey: testProxyKey,
-		Prefix:   "/metrics",
+		Path:     proxyPath,
 		Upstream: rec.server.URL,
 		ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
 	}
@@ -65,8 +66,11 @@ func TestNewProxyRejectsInvalidOptions(t *testing.T) {
 		"no client ip":  {ProxyKey: testProxyKey},
 		"secret as prx": {ProxyKey: testSecretKey, ClientIP: clientIP},
 		"public as prx": {ProxyKey: testPublicKey, ClientIP: clientIP},
-		"bad prefix":    {ProxyKey: testProxyKey, ClientIP: clientIP, Prefix: "metrics"},
-		"query prefix":  {ProxyKey: testProxyKey, ClientIP: clientIP, Prefix: "/a?b"},
+		"relative path": {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "k7x2qm4a"},
+		"root path":     {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/"},
+		"slashes path":  {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "///"},
+		"query path":    {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a?b"},
+		"fragment path": {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a#b"},
 		"bad version":   {ProxyKey: testProxyKey, ClientIP: clientIP, APIVersion: "v0"},
 		"bad upstream":  {ProxyKey: testProxyKey, ClientIP: clientIP, Upstream: "file:///private"},
 		"negative body": {ProxyKey: testProxyKey, ClientIP: clientIP, MaxBodyBytes: -1},
@@ -78,34 +82,50 @@ func TestNewProxyRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
-func TestProxyForwardsBothProxyableRoutes(t *testing.T) {
-	for _, path := range []string{
-		identifyPath, "/metrics/api/v1/events/request-1/supplement",
-	} {
-		proxy, rec := newProxy(t, nil)
-		response := call(proxy, http.MethodPost, path, browserHeaders(), "{}")
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("%s: status %d", path, response.StatusCode)
+func TestProxyForwardsBothCallsToTheOneIngestURL(t *testing.T) {
+	// The identification and the deferred report share the path; the API
+	// tells them apart by the body.
+	for _, body := range []string{`{"signals":{}}`, `{"token":"t"}`} {
+		for _, path := range []string{proxyPath, proxyPath + "/"} {
+			proxy, rec := newProxy(t, nil)
+			response := call(proxy, http.MethodPost, path, browserHeaders(), body)
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("%s %s: status %d", path, body, response.StatusCode)
+			}
+			if got := rec.requests[0].URL.Path; got != ingestPath {
+				t.Errorf("%s %s: forwarded to %q, want %q", path, body, got, ingestPath)
+			}
+			if got := rec.body(0); got != body {
+				t.Errorf("%s: body is %q", path, got)
+			}
 		}
-		want := strings.TrimPrefix(path, "/metrics")
-		if got := rec.requests[0].URL.Path; got != want {
-			t.Errorf("%s: forwarded to %q, want %q", path, got, want)
-		}
+	}
+}
+
+func TestProxyForwardsToTheConfiguredVersionsIngestURL(t *testing.T) {
+	proxy, rec := newProxy(t, func(o *ProxyOptions) { o.APIVersion = "v2" })
+	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", response.StatusCode)
+	}
+	if got := rec.requests[0].URL.Path; got != "/api/v2/ingest" {
+		t.Errorf("forwarded to %q", got)
 	}
 }
 
 func TestProxySendsOnlyVettedVisitorMetadata(t *testing.T) {
 	proxy, rec := newProxy(t, nil)
-	call(proxy, http.MethodPost, identifyPath, browserHeaders(), `{"signals":{}}`)
+	call(proxy, http.MethodPost, proxyPath, browserHeaders(), `{"signals":{}}`)
 
 	forwarded := rec.requests[0]
 	for name, want := range map[string]string{
-		"X-API-Key":             testPublicKey,
-		"X-Fingerly-Proxy-Key":  testProxyKey,
-		"X-Fingerly-Client-IP":  "203.0.113.5",
-		"X-Fingerly-Origin":     "https://shop.test",
-		"X-Fingerly-User-Agent": "Firefox",
-		"Idempotency-Key":       "idem-1",
+		"X-API-Key":                testPublicKey,
+		"X-Fingerly-Proxy-Key":     testProxyKey,
+		"X-Fingerly-Client-IP":     "203.0.113.5",
+		"X-Fingerly-Origin":        "https://shop.test",
+		"X-Fingerly-User-Agent":    "Firefox",
+		"X-Fingerly-Proxy-Version": "go/" + Version,
+		"Idempotency-Key":          "idem-1",
 	} {
 		if got := forwarded.Header.Get(name); got != want {
 			t.Errorf("%s is %q, want %q", name, got, want)
@@ -123,46 +143,63 @@ func TestProxySendsOnlyVettedVisitorMetadata(t *testing.T) {
 
 func TestProxyMarksResponsesUncacheable(t *testing.T) {
 	proxy, _ := newProxy(t, nil)
-	response := call(proxy, http.MethodPost, identifyPath, browserHeaders(), "{}")
+	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
 	if got := response.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control is %q", got)
 	}
 }
 
-func TestProxyDropsConnectionHeadersFromTheUpstream(t *testing.T) {
+func TestProxyRelaysOnlyAllowlistedHeaders(t *testing.T) {
 	rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-Id", "req-1")
+		w.Header().Set("RateLimit-Limit", "100")
 		w.Header().Set("RateLimit-Remaining", "99")
+		w.Header().Set("Retry-After", "3")
+		w.Header().Set("Fingerly-Balance-Micros", "100")
+		w.Header().Set("Set-Cookie", "a=b")
+		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Cache-Control", "public, max-age=600")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":1}`))
 	})
 	proxy, err := NewProxy(ProxyOptions{
-		ProxyKey: testProxyKey, Prefix: "/metrics", Upstream: rec.server.URL,
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
 		ClientIP: func(*http.Request) string { return "203.0.113.5" },
 	})
 	if err != nil {
 		t.Fatalf("NewProxy: %v", err)
 	}
 
-	response := call(proxy, http.MethodPost, identifyPath, browserHeaders(), "{}")
-	if got := response.Header.Get("RateLimit-Remaining"); got != "99" {
-		t.Errorf("a useful upstream header was dropped: %q", got)
+	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+	for name, want := range map[string]string{
+		"Content-Type":        "application/json",
+		"X-Request-Id":        "req-1",
+		"RateLimit-Limit":     "100",
+		"RateLimit-Remaining": "99",
+		"Retry-After":         "3",
+		"Cache-Control":       "no-store",
+	} {
+		if got := response.Header.Get(name); got != want {
+			t.Errorf("%s is %q, want %q", name, got, want)
+		}
 	}
-	if got := response.Header.Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control is %q, want no-store", got)
-	}
-	for _, name := range []string{"Content-Encoding", "Transfer-Encoding"} {
+	for _, name := range []string{"Fingerly-Balance-Micros", "Set-Cookie", "Content-Encoding"} {
 		if got := response.Header.Get(name); got != "" {
 			t.Errorf("%s was relayed: %q", name, got)
+		}
+	}
+	// Nothing relayed may name Fingerly: a blocker can match a header name.
+	for name, values := range response.Header {
+		if strings.Contains(strings.ToLower(name+" "+strings.Join(values, " ")), "fingerly") {
+			t.Errorf("relayed header %s: %q names Fingerly", name, values)
 		}
 	}
 }
 
 func TestProxyRefusesAnythingButPost(t *testing.T) {
 	proxy, rec := newProxy(t, nil)
-	response := call(proxy, http.MethodGet, identifyPath, browserHeaders(), "")
+	response := call(proxy, http.MethodGet, proxyPath, browserHeaders(), "")
 	if response.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status %d", response.StatusCode)
 	}
@@ -174,24 +211,38 @@ func TestProxyRefusesAnythingButPost(t *testing.T) {
 	}
 }
 
-func TestProxyRefusesEveryRouteThatIsNotProxyable(t *testing.T) {
+func TestProxyRefusesEveryOtherPath(t *testing.T) {
 	for _, path := range []string{
-		"/metrics/api/v1/events",
-		"/metrics/api/v1/events/request-1",
-		"/metrics/api/v1/events/a/b/supplement",
-		"/metrics/api/v1/events//supplement",
-		"/metrics/api/v1/identify/extra",
-		"/metrics/api/v2/identify",
-		"/metrics/admin",
-		"/elsewhere/api/v1/identify",
+		"/",
+		"/other",
+		"/k7x2qm4a/admin",
+		"/k7x2qm4a/api/v1/identify",
+		"/k7x2qm4ab",
+		"/api/v1/ingest",
+		"/elsewhere/k7x2qm4a",
 	} {
-		proxy, rec := newProxy(t, nil)
-		response := call(proxy, http.MethodPost, path, browserHeaders(), "{}")
-		if response.StatusCode != http.StatusNotFound {
-			t.Errorf("%s: status %d, want 404", path, response.StatusCode)
+		for _, method := range []string{http.MethodPost, http.MethodGet} {
+			proxy, rec := newProxy(t, nil)
+			response := call(proxy, method, path, browserHeaders(), "{}")
+			if response.StatusCode != http.StatusNotFound {
+				t.Errorf("%s %s: status %d, want 404", method, path, response.StatusCode)
+			}
+			if len(rec.requests) != 0 {
+				t.Errorf("%s %s: reached the upstream", method, path)
+			}
 		}
-		if len(rec.requests) != 0 {
-			t.Errorf("%s: reached the upstream", path)
+	}
+}
+
+func TestProxyWithoutAPathAnswersWhereverItIsRouted(t *testing.T) {
+	for _, path := range []string{proxyPath, "/", "/anything/else"} {
+		proxy, rec := newProxy(t, func(o *ProxyOptions) { o.Path = "" })
+		response := call(proxy, http.MethodPost, path, browserHeaders(), "{}")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", path, response.StatusCode)
+		}
+		if got := rec.requests[0].URL.Path; got != ingestPath {
+			t.Errorf("%s: forwarded to %q", path, got)
 		}
 	}
 }
@@ -206,7 +257,7 @@ func TestProxyRefusesAPublicKeyFromAnotherDeployment(t *testing.T) {
 		proxy, rec := newProxy(t, nil)
 		headers := browserHeaders()
 		headers["X-API-Key"] = key
-		response := call(proxy, http.MethodPost, identifyPath, headers, "{}")
+		response := call(proxy, http.MethodPost, proxyPath, headers, "{}")
 		if response.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", name, response.StatusCode)
 		}
@@ -218,7 +269,7 @@ func TestProxyRefusesAPublicKeyFromAnotherDeployment(t *testing.T) {
 
 func TestProxyRefusesAnOversizedBody(t *testing.T) {
 	proxy, rec := newProxy(t, func(o *ProxyOptions) { o.MaxBodyBytes = 8 })
-	response := call(proxy, http.MethodPost, identifyPath, browserHeaders(),
+	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(),
 		"a body well past the limit")
 	if response.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("status %d, want 413", response.StatusCode)
@@ -237,7 +288,7 @@ func TestProxyRefusesAClientIPThatCouldInjectAHeader(t *testing.T) {
 		proxy, rec := newProxy(t, func(o *ProxyOptions) {
 			o.ClientIP = func(*http.Request) string { return address }
 		})
-		response := call(proxy, http.MethodPost, identifyPath, browserHeaders(), "{}")
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
 		if response.StatusCode != http.StatusInternalServerError {
 			t.Errorf("%s: status %d, want 500", name, response.StatusCode)
 		}
@@ -247,12 +298,12 @@ func TestProxyRefusesAClientIPThatCouldInjectAHeader(t *testing.T) {
 	}
 }
 
-func TestProxyWorksBehindStripPrefix(t *testing.T) {
-	proxy, rec := newProxy(t, nil)
+func TestProxyWorksBehindStripPrefixWithoutAPath(t *testing.T) {
+	proxy, rec := newProxy(t, func(o *ProxyOptions) { o.Path = "" })
 	mux := http.NewServeMux()
-	mux.Handle("/metrics/", http.StripPrefix("/metrics", proxy))
+	mux.Handle(proxyPath, http.StripPrefix(proxyPath, proxy))
 
-	request := httptest.NewRequest(http.MethodPost, identifyPath, strings.NewReader("{}"))
+	request := httptest.NewRequest(http.MethodPost, proxyPath, strings.NewReader("{}"))
 	for name, value := range browserHeaders() {
 		request.Header.Set(name, value)
 	}
@@ -262,7 +313,7 @@ func TestProxyWorksBehindStripPrefix(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status %d", response.Code)
 	}
-	if got := rec.requests[0].URL.Path; got != "/api/v1/identify" {
+	if got := rec.requests[0].URL.Path; got != ingestPath {
 		t.Errorf("forwarded to %q", got)
 	}
 }
@@ -270,11 +321,11 @@ func TestProxyWorksBehindStripPrefix(t *testing.T) {
 func TestProxyMountsOnAServeMux(t *testing.T) {
 	proxy, rec := newProxy(t, nil)
 	mux := http.NewServeMux()
-	mux.Handle("/metrics/", proxy)
+	mux.Handle(proxyPath, proxy)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	request, _ := http.NewRequest(http.MethodPost, server.URL+identifyPath, strings.NewReader("{}"))
+	request, _ := http.NewRequest(http.MethodPost, server.URL+proxyPath, strings.NewReader("{}"))
 	for name, value := range browserHeaders() {
 		request.Header.Set(name, value)
 	}
@@ -287,7 +338,7 @@ func TestProxyMountsOnAServeMux(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", response.StatusCode)
 	}
-	if got := rec.requests[0].URL.Path; got != "/api/v1/identify" {
+	if got := rec.requests[0].URL.Path; got != ingestPath {
 		t.Errorf("forwarded to %q", got)
 	}
 }
@@ -296,7 +347,7 @@ func TestProxyForwardsTheSecretKeyWithoutAPublicKey(t *testing.T) {
 	proxy, rec := newProxy(t, func(o *ProxyOptions) {
 		o.ProxyKey, o.SecretKey = "", testSecretKey
 	})
-	response := call(proxy, http.MethodPost, identifyPath, map[string]string{}, "{}")
+	response := call(proxy, http.MethodPost, proxyPath, map[string]string{}, "{}")
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", response.StatusCode)
 	}

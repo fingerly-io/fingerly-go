@@ -113,7 +113,7 @@ func ExampleVerifyWebhook() {
 func ExampleNewProxy() {
 	proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
 		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
-		Prefix:   "/metrics",
+		Path:     "/k7x2qm4a",
 		ClientIP: func(r *http.Request) string {
 			// Read this from infrastructure you trust, never from the
 			// left-most X-Forwarded-For value: the visitor writes that.
@@ -125,7 +125,7 @@ func ExampleNewProxy() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics/", proxy)
+	mux.Handle("/k7x2qm4a", proxy)
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 

@@ -11,25 +11,24 @@ import (
 )
 
 const (
-	defaultProxyPrefix  = "/api/fingerly"
 	defaultMaxBodyBytes = 1 << 20 // 1 MiB
 	defaultProxyTimeout = 5 * time.Second
 )
 
-// connectionHeaders describe the upstream connection rather than our response.
-// Go's transport has already framed and decoded the body, so replaying them
-// would misdescribe the bytes handed back.
-var connectionHeaders = []string{
-	"Connection",
-	"Content-Encoding",
-	"Content-Length",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te",
-	"Trailer",
-	"Transfer-Encoding",
-	"Upgrade",
+// proxyVersion is what the proxy reports itself as upstream; the dashboard
+// shows it per proxy.
+const proxyVersion = "go/" + Version
+
+// relayedHeaders are the response headers relayed to the browser, and nothing
+// else. A content blocker can match a response header by name, so an
+// allowlist is what keeps anything naming Fingerly off the page, whatever the
+// API adds in future.
+var relayedHeaders = []string{
+	"Content-Type",
+	"X-Request-Id",
+	"RateLimit-Limit",
+	"RateLimit-Remaining",
+	"Retry-After",
 }
 
 // ProxyOptions configures a Proxy. ProxyKey and ClientIP are required.
@@ -45,10 +44,12 @@ type ProxyOptions struct {
 	// the left-most X-Forwarded-For value: the visitor writes it.
 	ClientIP func(*http.Request) string
 
-	// Prefix is the path the proxy is mounted under. It defaults to
-	// "/api/fingerly" and must match the mount.
-	Prefix string
-	// APIVersion is accepted locally and forwarded upstream. Defaults to "v1".
+	// Path is the path the dashboard issued for this proxy, such as
+	// "/k7x2qm4a", matched exactly: any other path gets 404. Leave it empty
+	// when the route already sends only that path to the handler, and behind
+	// http.StripPrefix, which changes the path the handler sees.
+	Path string
+	// APIVersion selects the upstream ingest URL. Defaults to "v1".
 	APIVersion string
 	// Upstream overrides the API origin implied by the key.
 	Upstream string
@@ -61,28 +62,29 @@ type ProxyOptions struct {
 	Transport http.RoundTripper
 }
 
-// Proxy serves the browser SDK's identify and supplement calls from a path on
-// your own domain, so content blockers cannot refuse them as third-party.
+// Proxy serves the browser SDK from a path on your own domain, so content
+// blockers cannot refuse its calls as third-party.
 //
 // It implements http.Handler, so every Go router takes it directly:
 //
 //	proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
 //		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
-//		Prefix:   "/metrics",
+//		Path:     "/k7x2qm4a",
 //		ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
 //	})
-//	mux.Handle("/metrics/", proxy)
+//	mux.Handle("/k7x2qm4a", proxy)
 //
-// Only those two routes are forwarded, never event reads: reading events needs
-// a secret key and must stay unreachable from a browser. Customer cookies and
-// authorization headers are never passed on.
+// The browser SDK posts both of its calls to that one path, and the proxy
+// forwards each to Fingerly's one ingest URL, never anywhere else and never to
+// event reads: reading events needs a secret key and must stay unreachable
+// from a browser. Customer cookies and authorization headers are never passed
+// on, and nothing relayed back names Fingerly.
 type Proxy struct {
 	key          string
 	scope        keyScope
 	usesProxyKey bool
-	upstream     string
-	prefix       string
-	apiVersion   string
+	upstreamURL  string
+	path         string
 	maxBodyBytes int64
 	clientIP     func(*http.Request) string
 	httpClient   *http.Client
@@ -124,7 +126,8 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	if upstream == "" {
 		upstream = defaultEndpoint
 	}
-	if proxy.upstream, err = normalizeOrigin(upstream); err != nil {
+	origin, err := normalizeOrigin(upstream)
+	if err != nil {
 		return nil, err
 	}
 
@@ -132,16 +135,15 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	if version == "" {
 		version = defaultAPIVersion
 	}
-	if proxy.apiVersion, err = normalizeAPIVersion(version); err != nil {
+	if version, err = normalizeAPIVersion(version); err != nil {
 		return nil, err
 	}
+	proxy.upstreamURL = origin + "/api/" + version + "/ingest"
 
-	prefix := options.Prefix
-	if prefix == "" {
-		prefix = defaultProxyPrefix
-	}
-	if proxy.prefix, err = normalizePrefix(prefix); err != nil {
-		return nil, err
+	if options.Path != "" {
+		if proxy.path, err = normalizePath(options.Path); err != nil {
+			return nil, err
+		}
 	}
 
 	if options.MaxBodyBytes < 0 {
@@ -170,15 +172,13 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.path != "" && strings.TrimRight(r.URL.Path, "/") != p.path {
+		refuse(w, http.StatusNotFound)
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		refuse(w, http.StatusMethodNotAllowed)
-		return
-	}
-
-	upstreamPath, ok := p.routeFor(r.URL.Path)
-	if !ok {
-		refuse(w, http.StatusNotFound)
 		return
 	}
 
@@ -205,7 +205,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	request, err := http.NewRequestWithContext(
-		r.Context(), http.MethodPost, p.upstream+upstreamPath, bytes.NewReader(body),
+		r.Context(), http.MethodPost, p.upstreamURL, bytes.NewReader(body),
 	)
 	if err != nil {
 		refuse(w, http.StatusInternalServerError)
@@ -223,37 +223,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	p.relay(w, response)
-}
-
-// routeFor maps a local request path to its upstream path.
-//
-// Only identify and supplement are proxyable. The prefix is tolerated as
-// either present or already stripped, so the handler works whether it is
-// mounted directly or behind http.StripPrefix.
-func (p *Proxy) routeFor(path string) (string, bool) {
-	versioned := "/api/" + p.apiVersion
-	resource, ok := strings.CutPrefix(path, p.prefix+versioned)
-	if !ok {
-		// http.StripPrefix removed the mount path before we saw it.
-		if resource, ok = strings.CutPrefix(path, versioned); !ok {
-			return "", false
-		}
-	}
-	if resource != "/identify" && !isSupplementPath(resource) {
-		return "", false
-	}
-	return versioned + resource, true
-}
-
-// isSupplementPath reports whether a resource is /events/{request_id}/supplement
-// with exactly one id segment.
-func isSupplementPath(resource string) bool {
-	requestID, ok := strings.CutPrefix(resource, "/events/")
-	if !ok {
-		return false
-	}
-	requestID, ok = strings.CutSuffix(requestID, "/supplement")
-	return ok && requestID != "" && !strings.Contains(requestID, "/")
 }
 
 // upstreamKeyFor decides which key to present upstream.
@@ -294,6 +263,7 @@ func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey strin
 	request.Header.Set("X-Fingerly-Client-IP", clientIP)
 	request.Header.Set("X-Fingerly-Origin", incoming.Header.Get("Origin"))
 	request.Header.Set("X-Fingerly-User-Agent", incoming.Header.Get("User-Agent"))
+	request.Header.Set("X-Fingerly-Proxy-Version", proxyVersion)
 	request.Header.Set("User-Agent", userAgent)
 	if p.usesProxyKey {
 		request.Header.Set("X-Fingerly-Proxy-Key", p.key)
@@ -304,17 +274,14 @@ func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey strin
 	return nil
 }
 
-// relay returns the upstream response to the browser, uncacheable and without
-// the headers that described the upstream connection.
+// relay returns the upstream response to the browser, uncacheable and with
+// only the allowlisted headers.
 func (p *Proxy) relay(w http.ResponseWriter, response *http.Response) {
 	header := w.Header()
-	for name, values := range response.Header {
-		for _, value := range values {
+	for _, name := range relayedHeaders {
+		for _, value := range response.Header.Values(name) {
 			header.Add(name, value)
 		}
-	}
-	for _, name := range connectionHeaders {
-		header.Del(name)
 	}
 	header.Set("Cache-Control", "no-store")
 
@@ -327,14 +294,16 @@ func (p *Proxy) relay(w http.ResponseWriter, response *http.Response) {
 	_, _ = io.Copy(w, response.Body)
 }
 
-// normalizePrefix validates the local mount path and drops trailing slashes.
-func normalizePrefix(value string) (string, error) {
-	prefix := strings.TrimRight(value, "/")
-	if !strings.HasPrefix(prefix, "/") ||
-		strings.ContainsAny(prefix, "?#") {
-		return "", errors.New("fingerly: Prefix must be an absolute URL path")
+// normalizePath validates the path the dashboard issued and drops trailing
+// slashes. It is matched exactly: the proxy answers that path and nothing
+// under it.
+func normalizePath(value string) (string, error) {
+	path := strings.TrimRight(strings.TrimSpace(value), "/")
+	if !strings.HasPrefix(path, "/") || len(path) < 2 ||
+		strings.ContainsAny(path, "?#") {
+		return "", errors.New("fingerly: Path must be an absolute URL path such as /k7x2qm4a")
 	}
-	return prefix, nil
+	return path, nil
 }
 
 // isHeaderSafe reports whether a value is printable ASCII, so it cannot inject
