@@ -27,7 +27,7 @@ func newProxy(t *testing.T, apply func(*ProxyOptions)) (*Proxy, *recorder) {
 		ProxyKey: testProxyKey,
 		Path:     proxyPath,
 		Upstream: rec.server.URL,
-		ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
+		ClientIP: func(r *http.Request) string { return r.Header.Get("X-Real-IP") },
 	}
 	if apply != nil {
 		apply(&options)
@@ -52,13 +52,13 @@ func call(proxy *Proxy, method, path string, headers map[string]string, body str
 
 func browserHeaders() map[string]string {
 	return map[string]string{
-		"X-API-Key":        testPublicKey,
-		"Origin":           "https://shop.test",
-		"User-Agent":       "Firefox",
-		"CF-Connecting-IP": "203.0.113.5",
-		"Cookie":           "session=secret",
-		"Authorization":    "Bearer secret",
-		"Idempotency-Key":  "idem-1",
+		"X-API-Key":       testPublicKey,
+		"Origin":          "https://shop.test",
+		"User-Agent":      "Firefox",
+		"X-Real-IP":       "203.0.113.5",
+		"Cookie":          "session=secret",
+		"Authorization":   "Bearer secret",
+		"Idempotency-Key": "idem-1",
 	}
 }
 
@@ -284,21 +284,59 @@ func TestProxyRefusesAnOversizedBody(t *testing.T) {
 	}
 }
 
-func TestProxyRefusesAClientIPThatCouldInjectAHeader(t *testing.T) {
+func TestProxyRefusesAClientIPThatIsNotOneAddress(t *testing.T) {
 	for name, address := range map[string]string{
-		"crlf":    "1.2.3.4\r\nX-Evil: 1",
-		"newline": "1.2.3.4\n",
-		"unicode": "hé",
+		"crlf":      "1.2.3.4\r\nX-Evil: 1",
+		"newline":   "1.2.3.4\n",
+		"unicode":   "hé",
+		"empty":     "",
+		"null":      "null",
+		"list":      "203.0.113.5, 198.51.100.7",
+		"with port": "203.0.113.5:443",
+		"spaces":    " 203.0.113.5",
+		"zone":      "fe80::1%en0",
+		"garbage":   "not-an-ip",
 	} {
+		var reports int
 		proxy, rec := newProxy(t, func(o *ProxyOptions) {
 			o.ClientIP = func(*http.Request) string { return address }
+			o.OnError = func(_ *http.Request, failure *ProxyError) {
+				if failure.Status == http.StatusInternalServerError {
+					reports++
+				}
+			}
 		})
-		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
-		if response.StatusCode != http.StatusInternalServerError {
-			t.Errorf("%s: status %d, want 500", name, response.StatusCode)
+		for i := 0; i < 3; i++ {
+			response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+			body, _ := io.ReadAll(response.Body)
+			if response.StatusCode != http.StatusInternalServerError ||
+				string(body) != "The client IP callback returned no valid address" {
+				t.Errorf("%s: %d %q", name, response.StatusCode, body)
+			}
 		}
 		if len(rec.requests) != 0 {
 			t.Errorf("%s: reached the upstream", name)
+		}
+		if reports != 1 {
+			t.Errorf("%s: reported %d times, want once", name, reports)
+		}
+	}
+}
+
+func TestProxyForwardsAValidClientIPCanonically(t *testing.T) {
+	for given, want := range map[string]string{
+		"203.0.113.5":        "203.0.113.5",
+		"2001:DB8::1":        "2001:db8::1",
+		"::ffff:203.0.113.5": "::ffff:203.0.113.5",
+	} {
+		proxy, rec := newProxy(t, func(o *ProxyOptions) {
+			o.ClientIP = func(*http.Request) string { return given }
+		})
+		if response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}"); response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", given, response.StatusCode)
+		}
+		if got := rec.requests[0].Header.Get("X-Fingerly-Client-IP"); got != want {
+			t.Errorf("%s forwarded as %q, want %q", given, got, want)
 		}
 	}
 }
@@ -352,7 +390,8 @@ func TestProxyForwardsTheSecretKeyWithoutAPublicKey(t *testing.T) {
 	proxy, rec := newProxy(t, func(o *ProxyOptions) {
 		o.ProxyKey, o.SecretKey = "", testSecretKey
 	})
-	response := call(proxy, http.MethodPost, proxyPath, map[string]string{}, "{}")
+	// No public key: the deprecated secret-key mode authenticates on its own.
+	response := call(proxy, http.MethodPost, proxyPath, map[string]string{"X-Real-IP": "203.0.113.5"}, "{}")
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", response.StatusCode)
 	}

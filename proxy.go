@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,9 +50,12 @@ type ProxyOptions struct {
 	// will be refused in the next major version; do not pass both.
 	SecretKey string
 
-	// ClientIP resolves the visitor's address. Read it from a header your own
-	// infrastructure sets, such as your load balancer's or CDN's. Never use
-	// the left-most X-Forwarded-For value: the visitor writes it.
+	// ClientIP resolves the visitor's address, which must be exactly one IPv4
+	// or IPv6 literal. Read it from a header your own infrastructure sets,
+	// such as your load balancer's or CDN's, and fall back to the TCP peer in
+	// r.RemoteAddr. Never use the left-most X-Forwarded-For value: the visitor
+	// writes it. Anything that is not one address is a configuration error:
+	// the proxy answers 500 without calling upstream and reports it once.
 	ClientIP func(*http.Request) string
 
 	// Path is the path the dashboard issued for this proxy, such as
@@ -87,7 +92,7 @@ type ProxyOptions struct {
 //	proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
 //		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
 //		Path:     "/k7x2qm4a",
-//		ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
+//		ClientIP: func(r *http.Request) string { return r.Header.Get("X-Real-IP") },
 //	})
 //	mux.Handle("/k7x2qm4a", proxy)
 //
@@ -106,7 +111,13 @@ type Proxy struct {
 	clientIP     func(*http.Request) string
 	httpClient   *http.Client
 	onError      func(*http.Request, *ProxyError)
+	// badClientIP reports an invalid ClientIP once, not once per request.
+	badClientIP sync.Once
 }
+
+// errNoClientIP is the configuration error for a ClientIP that returned
+// something other than one address.
+var errNoClientIP = errors.New("the client IP callback returned no valid address")
 
 // ProxyError is an upstream failure the proxy answered for. It never carries
 // a key or a response body.
@@ -228,6 +239,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP, ok := p.visitorIP(r)
+	if !ok {
+		p.badClientIP.Do(func() {
+			p.report(r, &ProxyError{Status: http.StatusInternalServerError, Err: errNoClientIP})
+		})
+		refuseWith(w, http.StatusInternalServerError, "The client IP callback returned no valid address")
+		return
+	}
+
 	// Refuse on the declared size first; MaxBytesReader enforces the real one.
 	if r.ContentLength > p.maxBodyBytes {
 		refuse(w, http.StatusRequestEntityTooLarge)
@@ -251,10 +271,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError)
 		return
 	}
-	if err := p.setUpstreamHeaders(request, r, apiKey); err != nil {
-		refuse(w, http.StatusInternalServerError)
-		return
-	}
+	p.setUpstreamHeaders(request, r, apiKey, clientIP)
 
 	response, err := p.httpClient.Do(request)
 	if err != nil {
@@ -345,12 +362,7 @@ func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
 //
 // Nothing is copied wholesale: only the body's content type, the visitor
 // metadata Fingerly needs, and an idempotency key when the SDK sent one.
-func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey string) error {
-	clientIP := p.clientIP(incoming)
-	if !isHeaderSafe(clientIP) {
-		return fmt.Errorf("fingerly: ClientIP must resolve to a plain address")
-	}
-
+func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey, clientIP string) {
 	contentType := incoming.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
@@ -368,7 +380,16 @@ func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey strin
 	if idempotency := incoming.Header.Get("Idempotency-Key"); idempotency != "" {
 		request.Header.Set("Idempotency-Key", idempotency)
 	}
-	return nil
+}
+
+// visitorIP runs the ClientIP callback and accepts exactly one IPv4 or IPv6
+// literal: no list, no port, no zone, no surrounding space.
+func (p *Proxy) visitorIP(r *http.Request) (string, bool) {
+	address, err := netip.ParseAddr(p.clientIP(r))
+	if err != nil || address.Zone() != "" {
+		return "", false
+	}
+	return address.String(), true
 }
 
 // relay returns the upstream answer to the browser, uncacheable and with only
@@ -403,17 +424,6 @@ func normalizePath(value string) (string, error) {
 	return path, nil
 }
 
-// isHeaderSafe reports whether a value is printable ASCII, so it cannot inject
-// a header of its own.
-func isHeaderSafe(value string) bool {
-	for _, r := range value {
-		if r < 0x20 || r > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 // refuse writes a short plain-text answer that names nobody.
 func refuse(w http.ResponseWriter, status int) {
 	text := http.StatusText(status)
@@ -423,6 +433,11 @@ func refuse(w http.ResponseWriter, status int) {
 	case http.StatusGatewayTimeout:
 		text = "Gateway timeout"
 	}
+	refuseWith(w, status, text)
+}
+
+// refuseWith writes status and a one-line text body, uncacheable.
+func refuseWith(w http.ResponseWriter, status int, text string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)

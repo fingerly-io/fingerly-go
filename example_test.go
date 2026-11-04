@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -115,9 +116,15 @@ func ExampleNewProxy() {
 		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
 		Path:     "/k7x2qm4a",
 		ClientIP: func(r *http.Request) string {
-			// Read this from infrastructure you trust, never from the
-			// left-most X-Forwarded-For value: the visitor writes that.
-			return r.Header.Get("CF-Connecting-IP")
+			// The header your load balancer or CDN sets. Trust it only when
+			// traffic can reach this server through that hop alone; never
+			// trust the left-most X-Forwarded-For value, which the visitor
+			// writes.
+			if address := r.Header.Get("X-Real-IP"); address != "" {
+				return address
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			return host
 		},
 	})
 	if err != nil {
