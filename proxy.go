@@ -223,7 +223,8 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if p.path != "" && strings.TrimRight(r.URL.Path, "/") != p.path {
+	// EscapedPath, not Path: Path has already decoded %2F into a slash.
+	if p.path != "" && r.URL.EscapedPath() != p.path {
 		refuse(w, http.StatusNotFound)
 		return
 	}
@@ -412,16 +413,33 @@ func (p *Proxy) relay(w http.ResponseWriter, response *http.Response, body []byt
 	_, _ = w.Write(body)
 }
 
-// normalizePath validates the path the dashboard issued and drops trailing
-// slashes. It is matched exactly: the proxy answers that path and nothing
-// under it.
+// normalizePath validates the path the dashboard issued, dropping a trailing
+// slash from the configured value. Requests are matched against it exactly:
+// no prefix, no extra or trailing slash, no dot segment, no encoded
+// character, and case matters.
 func normalizePath(value string) (string, error) {
 	path := strings.TrimRight(strings.TrimSpace(value), "/")
-	if !strings.HasPrefix(path, "/") || len(path) < 2 ||
-		strings.ContainsAny(path, "?#") {
-		return "", errors.New("fingerly: Path must be an absolute URL path such as /k7x2qm4a")
+	invalid := errors.New("fingerly: Path must be an absolute URL path such as /k7x2qm4a")
+	if !strings.HasPrefix(path, "/") || len(path) < 2 {
+		return "", invalid
+	}
+	for _, segment := range strings.Split(path[1:], "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", invalid
+		}
+		for _, c := range segment {
+			if !isUnreserved(c) {
+				return "", invalid
+			}
+		}
 	}
 	return path, nil
+}
+
+// isUnreserved reports whether c may appear in a URL path unencoded.
+func isUnreserved(c rune) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 // refuse writes a short plain-text answer that names nobody.

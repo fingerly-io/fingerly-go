@@ -75,6 +75,9 @@ func TestNewProxyRejectsInvalidOptions(t *testing.T) {
 		"slashes path":  {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "///"},
 		"query path":    {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a?b"},
 		"fragment path": {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a#b"},
+		"double slash":  {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a//b"},
+		"dot segment":   {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a/../b"},
+		"encoded path":  {ProxyKey: testProxyKey, ClientIP: clientIP, Path: "/a%2Fb"},
 		"bad version":   {ProxyKey: testProxyKey, ClientIP: clientIP, APIVersion: "v0"},
 		"bad upstream":  {ProxyKey: testProxyKey, ClientIP: clientIP, Upstream: "file:///private"},
 		"negative body": {ProxyKey: testProxyKey, ClientIP: clientIP, MaxBodyBytes: -1},
@@ -90,7 +93,7 @@ func TestProxyForwardsBothCallsToTheOneIngestURL(t *testing.T) {
 	// The identification and the deferred report share the path; the API
 	// tells them apart by the body.
 	for _, body := range []string{`{"signals":{}}`, `{"token":"t"}`} {
-		for _, path := range []string{proxyPath, proxyPath + "/"} {
+		for _, path := range []string{proxyPath} {
 			proxy, rec := newProxy(t, nil)
 			response := call(proxy, http.MethodPost, path, browserHeaders(), body)
 			if response.StatusCode != http.StatusOK {
@@ -225,6 +228,14 @@ func TestProxyRefusesEveryOtherPath(t *testing.T) {
 		"/k7x2qm4ab",
 		"/api/v1/ingest",
 		"/elsewhere/k7x2qm4a",
+		"/k7x2qm4a/",
+		"/k7x2qm4a//",
+		"//k7x2qm4a",
+		"/k7x2qm4a/.",
+		"/./k7x2qm4a",
+		"/K7X2QM4A",
+		"/k7x2qm4a%2F",
+		"/%6B7x2qm4a",
 	} {
 		for _, method := range []string{http.MethodPost, http.MethodGet} {
 			proxy, rec := newProxy(t, nil)
