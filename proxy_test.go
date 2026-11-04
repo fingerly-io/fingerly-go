@@ -1,8 +1,10 @@
 package fingerly
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -158,7 +160,8 @@ func TestProxyRelaysOnlyAllowlistedHeaders(t *testing.T) {
 		w.Header().Set("Retry-After", "3")
 		w.Header().Set("Fingerly-Balance-Micros", "100")
 		w.Header().Set("Set-Cookie", "a=b")
-		w.Header().Set("Content-Encoding", "gzip")
+		// Not gzip, which the transport would decode and drop by itself.
+		w.Header().Set("Content-Encoding", "br")
 		w.Header().Set("Cache-Control", "public, max-age=600")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":1}`))
@@ -357,5 +360,41 @@ func TestProxyForwardsTheSecretKeyWithoutAPublicKey(t *testing.T) {
 	}
 	if got := forwarded.Header.Get("X-Fingerly-Proxy-Key"); got != "" {
 		t.Errorf("a proxy key was sent in secret-key mode: %q", got)
+	}
+}
+
+func TestProxyNeverRelaysATruncatedAnswerAsASuccess(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"breaks mid-body": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"request_id":`))
+		},
+		"over the cap": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(bytes.Repeat([]byte("a"), maxRelayBytes+1))
+		},
+		"declares more than the cap": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(maxRelayBytes+1))
+			w.WriteHeader(http.StatusOK)
+		},
+	}
+	for name, handler := range cases {
+		rec := newRecorder(t, handler)
+		proxy, err := NewProxy(ProxyOptions{
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+			ClientIP: func(*http.Request) string { return "203.0.113.5" },
+		})
+		if err != nil {
+			t.Fatalf("NewProxy: %v", err)
+		}
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+		if response.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s: status %d, want 502", name, response.StatusCode)
+		}
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control %q", name, got)
+		}
 	}
 }

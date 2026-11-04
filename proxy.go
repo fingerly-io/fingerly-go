@@ -13,7 +13,13 @@ import (
 const (
 	defaultMaxBodyBytes = 1 << 20 // 1 MiB
 	defaultProxyTimeout = 5 * time.Second
+	// maxRelayBytes caps the upstream answer the proxy holds. An ingest answer
+	// is a few kilobytes; anything past this is not one.
+	maxRelayBytes = 4 << 20
 )
+
+// errUpstreamTooLarge reports an upstream answer over maxRelayBytes.
+var errUpstreamTooLarge = errors.New("upstream answer exceeds 4 MiB")
 
 // proxyVersion is what the proxy reports itself as upstream; the dashboard
 // shows it per proxy.
@@ -227,8 +233,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadGateway)
 		return
 	}
-	defer func() { _ = response.Body.Close() }()
-	p.relay(w, response)
+	upstreamBody, err := readUpstream(response)
+	_ = response.Body.Close()
+	if err != nil {
+		refuse(w, http.StatusBadGateway)
+		return
+	}
+	p.relay(w, response, upstreamBody)
+}
+
+// readUpstream reads the whole upstream answer, up to maxRelayBytes, before
+// anything is written to the browser. An answer that stalls or breaks
+// mid-body therefore becomes a 502 instead of a 200 with half a body.
+func readUpstream(response *http.Response) ([]byte, error) {
+	if response.ContentLength > maxRelayBytes {
+		return nil, errUpstreamTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRelayBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxRelayBytes {
+		return nil, errUpstreamTooLarge
+	}
+	return body, nil
 }
 
 // upstreamKeyFor decides which key to present upstream.
@@ -280,9 +308,9 @@ func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey strin
 	return nil
 }
 
-// relay returns the upstream response to the browser, uncacheable and with
-// only the allowlisted headers.
-func (p *Proxy) relay(w http.ResponseWriter, response *http.Response) {
+// relay returns the upstream answer to the browser, uncacheable and with only
+// the allowlisted headers.
+func (p *Proxy) relay(w http.ResponseWriter, response *http.Response, body []byte) {
 	header := w.Header()
 	for _, name := range relayedHeaders {
 		for _, value := range response.Header.Values(name) {
@@ -297,7 +325,7 @@ func (p *Proxy) relay(w http.ResponseWriter, response *http.Response) {
 		response.StatusCode == http.StatusNotModified {
 		return
 	}
-	_, _ = io.Copy(w, response.Body)
+	_, _ = w.Write(body)
 }
 
 // normalizePath validates the path the dashboard issued and drops trailing
