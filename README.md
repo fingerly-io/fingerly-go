@@ -27,6 +27,12 @@ perform one request and never retry.
 `New` returns only a client, so it composes in a package-level `var`. An
 invalid key or option is reported by the first call, before anything is sent.
 
+Every `Client` and `Proxy` in the process shares one connection pool, which
+keeps 256 idle connections per host and is replaced every five minutes so a
+DNS change is picked up. There is nothing to tune for a busy server. Pass
+`WithHTTPClient` or `ProxyOptions.Transport` only for a custom HTTP stack; an
+`http.Client` with a nil `Transport` still gets the shared pool.
+
 ## Deadlines and cancellation
 
 Every call takes a `context.Context`, and a Go request context governs the
@@ -37,22 +43,33 @@ request.
 
 ## Errors
 
-A non-2xx response returns an `*APIError` with `Status`, and optional `Code`,
-`Details` and `RequestID`. The secret key is stripped from all three, and the
-response body is never echoed.
+Any response outside 2xx, redirects included, returns an `*APIError` with
+`Status`, and optional `Code`, `Details`, `RequestID` and `RetryAfter`. The
+secret key is stripped from all of them, and the response body is never
+echoed. `RetryAfter` is the number of seconds from the `Retry-After` header,
+or nil when there was none; the SDK never retries a read itself.
 
 ```go
 var apiErr *fingerly.APIError
-if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-	// ...
+if errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests && apiErr.RetryAfter != nil {
+	wait := time.Duration(*apiErr.RetryAfter) * time.Second
+	_ = wait // back off for at least this long
 }
 ```
 
-The one retryable read failure has a sentinel, so it needs no status check:
+A missing event has a sentinel, so it needs no status check:
 
 ```go
-if errors.Is(err, fingerly.ErrEventNotFound) { /* not archived yet */ }
+if errors.Is(err, fingerly.ErrEventNotFound) { /* no such request id */ }
 ```
+
+A read that got no complete answer (refused, reset, timed out, or broken off
+mid-body) returns a `*fingerly.ConnectionError`, and
+`errors.Is(err, fingerly.ErrTimeout)` is true when a deadline passed. An
+answer over 4 MiB returns `fingerly.ErrResponseTooLarge`.
+
+Printing a `Client`, `Proxy` or `ProxyOptions` with any `fmt` verb, `slog` or
+`encoding/json` shows the keys as `[redacted]`.
 
 ## Unscored events
 
@@ -110,7 +127,8 @@ ok := fingerly.VerifyWebhook(
 Verify the exact raw bytes before decoding them. Signatures cover the timestamp
 and body. The default replay tolerance is five minutes; persist processed
 `WebhookEvent.ID` values to deduplicate deliveries. During signing-secret
-rotation, any matching signature in the comma-separated header is accepted.
+rotation, any matching signature among the first 32 in the comma-separated
+header is accepted.
 Malformed or missing input is a false result, never a panic.
 
 `WebhookEvent` decodes the envelope every delivery shares and leaves `Data`
@@ -125,23 +143,51 @@ hop declare the visitor's real address, origin and user agent; a public key
 alone never can, so nobody can spoof them.
 
 Create a proxy in the dashboard (**Integration > Proxy keys**) and mount the
-handler at the path it issued, here `/k7x2qm4a`. `Proxy` implements
+handler at the path it issued, here `/k7x2qm4a`:
+
+```go
+package main
+
+import (
+	"log"
+	"net"
+	"net/http"
+	"os"
+
+	fingerly "github.com/fingerly-io/fingerly-go"
+)
+
+func main() {
+	proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
+		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
+		Path:     "/k7x2qm4a",
+		ClientIP: func(r *http.Request) string {
+			// The header your load balancer or CDN sets, else the TCP peer.
+			if address := r.Header.Get("X-Real-IP"); address != "" {
+				return address
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			return host
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/k7x2qm4a", proxy)
+	log.Fatal(http.ListenAndServe(":8080", mux))
+}
+```
+
+Trust that header only when traffic can reach the server through that load
+balancer or CDN alone; otherwise a visitor can set it. `Proxy` implements
 `http.Handler`, so every Go router takes it directly:
 
 ```go
-proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
-	ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
-	Path:     "/k7x2qm4a",
-	ClientIP: func(r *http.Request) string { return r.Header.Get("CF-Connecting-IP") },
-})
-if err != nil {
-	log.Fatal(err)
-}
-
-mux.Handle("/k7x2qm4a", proxy)                            // net/http
-router.Handle("/k7x2qm4a", proxy)                         // gorilla/mux
-r.Handle("/k7x2qm4a", proxy)                              // chi
-router.Any("/k7x2qm4a", gin.WrapH(proxy))                 // gin
+router.Handle("/k7x2qm4a", proxy)         // gorilla/mux
+r.Handle("/k7x2qm4a", proxy)              // chi
+router.Any("/k7x2qm4a", gin.WrapH(proxy)) // gin
 ```
 
 Then point the browser SDK at the same path. It posts both of its calls there,
@@ -156,8 +202,9 @@ wired up once at start-up, where an error is natural to handle.
 
 ### What the proxy does
 
-With `Path` set it answers only that path, matched exactly with trailing
-slashes ignored; anything else gets `404`, including paths under it. `Path` is
+With `Path` set it answers only that path, matched exactly: a trailing or
+doubled slash, a dot segment, an encoded character, a different case or a path
+under it all get `404`. `Path` is
 optional: leave it empty when the route already sends only that path to the
 handler, and behind `http.StripPrefix`, which changes the path the handler
 sees. It must be an absolute path such as `/k7x2qm4a`, or `NewProxy` returns
@@ -173,6 +220,23 @@ type, the visitor metadata Fingerly needs, and an `Idempotency-Key` are
 forwarded; customer cookies and authorization headers never are. The proxy
 reports itself upstream as `go/0.1.0`, which the dashboard shows per proxy.
 
+One deadline, `Timeout` (5 seconds by default), covers the whole upstream
+exchange, body included, so a trickling answer cannot stretch it. When it
+passes the browser gets `504`; any other upstream failure (refused, reset, DNS,
+a truncated or malformed answer, an answer over 4 MiB) gets `502`. Both carry a
+short `text/plain` body and `Cache-Control: no-store`. The answer is read in
+full before anything is written, so a broken upstream never reaches the browser
+as a `200`. A visitor who disconnects cancels the upstream call.
+
+Each failure is reported once: to `ProxyOptions.OnError` if you set it,
+otherwise as one line through `slog.Default()`.
+
+```go
+OnError: func(r *http.Request, failure *fingerly.ProxyError) {
+	log.Printf("identification proxy answered %d: %v", failure.Status, failure.Err)
+},
+```
+
 Responses are marked `no-store`, and the only upstream headers relayed back are
 `Content-Type`, `X-Request-Id`, `RateLimit-Limit`, `RateLimit-Remaining` and
 `Retry-After`, so nothing on the response names Fingerly. Use the path the
@@ -180,8 +244,12 @@ dashboard issued: blockers look for words such as `fingerprint`, `tracking`,
 `analytics` and `fingerly` in the URL.
 
 > **`ClientIP` is the one thing you must get right.** Resolve it from a header
-> your own infrastructure sets, such as your load balancer's or CDN's. Never
-> read the left-most `X-Forwarded-For` value: the visitor writes it.
+> your own infrastructure sets, such as your load balancer's or CDN's, and fall
+> back to `r.RemoteAddr`. Never read the left-most `X-Forwarded-For` value: the
+> visitor writes it. It must return exactly one IPv4 or IPv6 address. Anything
+> else (empty, a list, a port) is a configuration error: the proxy answers
+> `500` with "The client IP callback returned no valid address", calls nothing
+> upstream, and reports it once.
 
 ## Development and release preparation
 
