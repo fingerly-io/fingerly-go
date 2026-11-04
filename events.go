@@ -17,8 +17,10 @@ type EventsService struct {
 
 // Get fetches one event by request id.
 //
-// An event is readable as soon as identification answers, so an error
-// matching ErrEventNotFound means a request id that was never issued.
+// An error matching ErrEventPending means the request id was accepted but the
+// event is not recorded yet; APIError.RetryAfter says when to try again. One
+// matching ErrEventNotFound means it was never issued or is past retention.
+// Neither is retried.
 func (s *EventsService) Get(ctx context.Context, requestID string) (*Event, error) {
 	body, err := s.client.get(ctx, "/events/"+url.PathEscape(requestID))
 	if err != nil {

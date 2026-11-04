@@ -52,6 +52,10 @@ func ExampleAPIError() {
 		event, err := client.Events.Get(ctx, requestID)
 		var apiErr *fingerly.APIError
 		switch {
+		case errors.Is(err, fingerly.ErrEventPending):
+			// Not decided yet, not fraud: retry after apiErr.RetryAfter
+			// seconds or verify asynchronously.
+			return "pending", nil
 		case errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound:
 			return "refuse", nil
 		case err != nil:

@@ -26,3 +26,7 @@ Changes made during pre-release testing:
   `*ConnectionError` (`errors.Is(err, ErrTimeout)` for deadlines), and answers
   over 4 MiB return `ErrResponseTooLarge`.
 - Webhook verification checks at most 32 signature candidates.
+- `ErrEventPending` matches `404 event_pending` with `errors.Is`: the request
+  id was accepted but the event is not recorded yet, and the `*APIError`
+  carries `RetryAfter`. `ErrEventNotFound` still matches only
+  `event_not_found` (never issued, or past retention). Neither is retried.

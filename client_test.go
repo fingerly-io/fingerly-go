@@ -234,12 +234,31 @@ func TestErrEventNotFoundIsNarrow(t *testing.T) {
 		code   string
 	}{
 		{"other code", http.StatusNotFound, "other"},
+		{"pending", http.StatusNotFound, "event_pending"},
 		{"other status", http.StatusGone, "event_not_found"},
 	} {
 		rec := newRecorder(t, respondJSON(tc.status, errorBody(tc.code, tc.status)))
 		_, err := testClient(rec).Events.Get(context.Background(), "missing")
 		if errors.Is(err, ErrEventNotFound) {
 			t.Errorf("%s: matched ErrEventNotFound", tc.name)
+		}
+	}
+}
+
+func TestErrEventPendingIsNarrow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"not found", http.StatusNotFound, "event_not_found"},
+		{"other code", http.StatusNotFound, "other"},
+		{"other status", http.StatusConflict, "event_pending"},
+	} {
+		rec := newRecorder(t, respondJSON(tc.status, errorBody(tc.code, tc.status)))
+		_, err := testClient(rec).Events.Get(context.Background(), "missing")
+		if errors.Is(err, ErrEventPending) {
+			t.Errorf("%s: matched ErrEventPending", tc.name)
 		}
 	}
 }

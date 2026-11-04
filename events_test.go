@@ -130,9 +130,9 @@ func TestListSendsWindowBoundsInUTC(t *testing.T) {
 	}
 }
 
-// An event is readable as soon as identification answers, so a missing one
-// means a request id that was never issued. It is reported at once, in one
-// request, rather than waited through.
+// A missing event is a request id that was never issued or is past
+// retention. It is reported at once, in one request, rather than waited
+// through.
 func TestGetReportsAMissingEventWithoutRetrying(t *testing.T) {
 	var calls int
 	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
@@ -185,5 +185,37 @@ func TestGetStopsWhenTheCallerCancels(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("the read ran for %v after being cancelled", elapsed)
+	}
+}
+
+// A pending event (accepted, not recorded yet) is reported at once too, with
+// the Retry-After seconds, and never matches ErrEventNotFound.
+func TestGetReportsAPendingEventWithoutRetrying(t *testing.T) {
+	var calls int
+	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "2")
+		respondJSON(http.StatusNotFound, errorBody("event_pending", 404))(w, r)
+	})
+
+	_, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if !errors.Is(err, ErrEventPending) {
+		t.Fatalf("error is %v, want ErrEventPending", err)
+	}
+	if errors.Is(err, ErrEventNotFound) {
+		t.Error("a pending event matched ErrEventNotFound")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is %T, want *APIError", err)
+	}
+	if apiErr.Status != http.StatusNotFound || apiErr.Code != "event_pending" {
+		t.Errorf("status %d code %q", apiErr.Status, apiErr.Code)
+	}
+	if apiErr.RetryAfter == nil || *apiErr.RetryAfter != 2 {
+		t.Errorf("RetryAfter is %v, want 2", apiErr.RetryAfter)
+	}
+	if calls != 1 {
+		t.Errorf("made %d requests, want 1", calls)
 	}
 }

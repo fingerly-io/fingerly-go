@@ -57,10 +57,16 @@ if errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests && api
 }
 ```
 
-A missing event has a sentinel, so it needs no status check:
+A `404` from `Events.Get` carries one of two codes, each with a sentinel, so
+neither needs a status check:
 
 ```go
-if errors.Is(err, fingerly.ErrEventNotFound) { /* no such request id */ }
+switch {
+case errors.Is(err, fingerly.ErrEventPending):
+	// Accepted but not recorded yet: retry after apiErr.RetryAfter seconds.
+case errors.Is(err, fingerly.ErrEventNotFound):
+	// Never issued for this key's environment, or past the 30-day retention.
+}
 ```
 
 A read that got no complete answer (refused, reset, timed out, or broken off
@@ -90,16 +96,15 @@ so a field the API adds later is reachable without an SDK upgrade.
 
 ## Read an event you just identified
 
-An event is readable as soon as identification answers, so this needs nothing
-special:
-
 ```go
 event, err := client.Events.Get(ctx, requestID)
 ```
 
-Earlier versions had a `WaitFor` that polled through the gap between
-identification and the event becoming queryable. There is no gap, so
-`ErrEventNotFound` now means a request id that was never issued.
+If the event is not recorded yet, the error matches `ErrEventPending` and its
+`*APIError` carries `RetryAfter`. That is not a verdict: try again after that
+many seconds, or verify asynchronously, for example from a webhook. The SDK
+never retries on its own. `ErrEventNotFound` means the request id was never
+issued or the event is past retention.
 
 The archived `Document` arrives moments after the event itself, so check
 `HasDocument` rather than assuming it is there.
@@ -111,6 +116,53 @@ that it is recent, that its environment is correct, and that it was scored.
 Apply your own policy to the server's verdict. Do not authorize an action using
 scores or visitor identifiers supplied by the browser. Tags correlate events;
 they do not replace your application's authentication or replay protection.
+
+```go
+package main
+
+import (
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+
+	"github.com/fingerly-io/fingerly-go"
+)
+
+var client = fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+
+// POST /verify/{request_id}
+func verify(w http.ResponseWriter, r *http.Request) {
+	event, err := client.Events.Get(r.Context(), r.PathValue("request_id"))
+	var apiErr *fingerly.APIError
+	switch {
+	case errors.Is(err, fingerly.ErrEventPending) && errors.As(err, &apiErr):
+		// Not decided yet, not fraud: ask the caller to come back.
+		wait := 2
+		if apiErr.RetryAfter != nil {
+			wait = *apiErr.RetryAfter
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(wait))
+		http.Error(w, "verification pending", http.StatusServiceUnavailable)
+		return
+	case errors.Is(err, fingerly.ErrEventNotFound):
+		http.Error(w, "unknown request", http.StatusForbidden)
+		return
+	case err != nil:
+		http.Error(w, "verification unavailable", http.StatusBadGateway)
+		return
+	}
+	// Apply your policy: event.Tag, event.OccurredAt, event.Scored() and
+	// event.SuspectLevel.
+	_, _ = w.Write([]byte(event.SuspectLevel))
+}
+
+func main() {
+	http.HandleFunc("POST /verify/{request_id}", verify)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
 
 ## Webhooks
 

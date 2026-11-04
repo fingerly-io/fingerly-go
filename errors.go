@@ -9,12 +9,21 @@ import (
 	"time"
 )
 
-// ErrEventNotFound matches a read for an event that does not exist. One is
-// readable as soon as identification answers, so this means a request id that
-// was never issued rather than one that has not landed yet.
+// ErrEventNotFound matches a read for an event that does not exist: the
+// request id was never issued for this key's environment, or the event is
+// past retention. An event that is still being recorded matches
+// ErrEventPending instead.
 //
 // Compare with errors.Is; the concrete error is always an *APIError.
 var ErrEventNotFound = errors.New("fingerly: event not found")
+
+// ErrEventPending matches a read for an event whose request id was accepted
+// but which is not recorded yet (404 event_pending). It is not a verdict: try
+// again after APIError.RetryAfter seconds, or verify asynchronously. The SDK
+// never retries on its own.
+//
+// Compare with errors.Is; the concrete error is always an *APIError.
+var ErrEventPending = errors.New("fingerly: event pending")
 
 // APIError is returned for any non-2xx response from the Fingerly API.
 //
@@ -51,9 +60,19 @@ func (e *APIError) Error() string {
 }
 
 // Is reports whether this error matches a sentinel, so a caller can write
-// errors.Is(err, fingerly.ErrEventNotFound) without unwrapping the status.
+// errors.Is(err, fingerly.ErrEventNotFound) or
+// errors.Is(err, fingerly.ErrEventPending) without unwrapping the status.
 func (e *APIError) Is(target error) bool {
-	return target == ErrEventNotFound && e.Status == 404 && e.Code == "event_not_found"
+	if e.Status != http.StatusNotFound {
+		return false
+	}
+	switch target {
+	case ErrEventNotFound:
+		return e.Code == "event_not_found"
+	case ErrEventPending:
+		return e.Code == "event_pending"
+	}
+	return false
 }
 
 // ErrTimeout matches a read whose deadline passed, whether the caller's or
