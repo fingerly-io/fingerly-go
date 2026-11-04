@@ -2,6 +2,8 @@ package fingerly
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -396,5 +398,101 @@ func TestProxyNeverRelaysATruncatedAnswerAsASuccess(t *testing.T) {
 		if got := response.Header.Get("Cache-Control"); got != "no-store" {
 			t.Errorf("%s: Cache-Control %q", name, got)
 		}
+	}
+}
+
+func TestProxyAnswersUpstreamFailuresWithoutNamingAnyone(t *testing.T) {
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) })
+	slow := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-stall:
+		case <-r.Context().Done():
+		}
+	})
+	trickle := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 1000; i++ {
+			if _, err := w.Write([]byte("a")); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+
+	for name, c := range map[string]struct {
+		upstream string
+		status   int
+		body     string
+	}{
+		"slow":    {slow.server.URL, http.StatusGatewayTimeout, "Gateway timeout"},
+		"trickle": {trickle.server.URL, http.StatusGatewayTimeout, "Gateway timeout"},
+		"refused": {closedURL, http.StatusBadGateway, "Bad gateway"},
+	} {
+		var reported []*ProxyError
+		proxy, err := NewProxy(ProxyOptions{
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: c.upstream, Timeout: 200 * time.Millisecond,
+			ClientIP: func(*http.Request) string { return "203.0.113.5" },
+			OnError:  func(_ *http.Request, failure *ProxyError) { reported = append(reported, failure) },
+		})
+		if err != nil {
+			t.Fatalf("NewProxy: %v", err)
+		}
+		started := time.Now()
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+		body, _ := io.ReadAll(response.Body)
+		if response.StatusCode != c.status || string(body) != c.body {
+			t.Errorf("%s: %d %q, want %d %q", name, response.StatusCode, body, c.status, c.body)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Errorf("%s: took %v; the deadline did not bound the exchange", name, elapsed)
+		}
+		if response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Content-Type") != "text/plain; charset=utf-8" {
+			t.Errorf("%s: headers %v", name, response.Header)
+		}
+		if len(reported) != 1 || reported[0].Status != c.status {
+			t.Errorf("%s: OnError got %v", name, reported)
+		}
+		if len(reported) == 1 && strings.Contains(reported[0].Error(), testProxyKey) {
+			t.Errorf("%s: the reported error carries the proxy key", name)
+		}
+	}
+}
+
+func TestProxyEndsQuietlyWhenTheVisitorDisconnects(t *testing.T) {
+	cancelled := make(chan struct{})
+	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(cancelled)
+	})
+	var reported int
+	proxy, err := NewProxy(ProxyOptions{
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+		ClientIP: func(*http.Request) string { return "203.0.113.5" },
+		OnError:  func(*http.Request, *ProxyError) { reported++ },
+	})
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, proxyPath, strings.NewReader("{}")).WithContext(ctx)
+	for name, value := range browserHeaders() {
+		request.Header.Set(name, value)
+	}
+	time.AfterFunc(100*time.Millisecond, cancel)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the upstream call was not cancelled")
+	}
+	if reported != 0 || recorder.Body.Len() != 0 {
+		t.Errorf("a disconnect was reported (%d) or answered (%q)", reported, recorder.Body.String())
 	}
 }

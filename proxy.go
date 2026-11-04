@@ -2,9 +2,12 @@ package fingerly
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -63,6 +66,12 @@ type ProxyOptions struct {
 	MaxBodyBytes int64
 	// Timeout bounds the upstream call. Defaults to 5 seconds.
 	Timeout time.Duration
+	// OnError is called once for every request the proxy answered with a 5xx
+	// of its own: 504 when the upstream deadline passed, 502 for any other
+	// upstream failure, 500 for a ClientIP that returned no valid address.
+	// Leave it nil to log one line per failure through slog.Default(). A
+	// visitor who disconnects is not a failure and is not reported.
+	OnError func(*http.Request, *ProxyError)
 	// Transport supplies the upstream round tripper, for tests or a custom
 	// HTTP stack. Left nil, the SDK's shared connection pool is used, sized
 	// for hundreds of requests in flight. Redirects are never followed either
@@ -96,7 +105,25 @@ type Proxy struct {
 	maxBodyBytes int64
 	clientIP     func(*http.Request) string
 	httpClient   *http.Client
+	onError      func(*http.Request, *ProxyError)
 }
+
+// ProxyError is an upstream failure the proxy answered for. It never carries
+// a key or a response body.
+type ProxyError struct {
+	// Status is what the browser was answered: 502, 504 or 500.
+	Status int
+	// Err is the underlying cause.
+	Err error
+}
+
+// Error implements error.
+func (e *ProxyError) Error() string {
+	return fmt.Sprintf("fingerly proxy: answered %d: %v", e.Status, e.Err)
+}
+
+// Unwrap returns the underlying cause.
+func (e *ProxyError) Unwrap() error { return e.Err }
 
 // NewProxy validates every option and builds the handler.
 //
@@ -117,6 +144,7 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 		usesProxyKey: options.ProxyKey != "",
 		clientIP:     options.ClientIP,
 		maxBodyBytes: defaultMaxBodyBytes,
+		onError:      options.OnError,
 	}
 	proxy.key = options.ProxyKey
 	kind := keyProxy
@@ -230,16 +258,51 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	response, err := p.httpClient.Do(request)
 	if err != nil {
-		refuse(w, http.StatusBadGateway)
+		p.fail(w, r, err)
 		return
 	}
 	upstreamBody, err := readUpstream(response)
 	_ = response.Body.Close()
 	if err != nil {
-		refuse(w, http.StatusBadGateway)
+		p.fail(w, r, err)
 		return
 	}
 	p.relay(w, response, upstreamBody)
+}
+
+// fail answers an upstream failure: 504 when the deadline passed, 502 for
+// anything else. A visitor who went away gets nothing: the upstream call was
+// cancelled with their request, and there is no one left to answer.
+func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		return
+	}
+	status := http.StatusBadGateway
+	if isTimeout(err) {
+		status = http.StatusGatewayTimeout
+	}
+	p.report(r, &ProxyError{Status: status, Err: err})
+	refuse(w, status)
+}
+
+// report hands a failure to OnError, or logs one line about it.
+func (p *Proxy) report(r *http.Request, failure *ProxyError) {
+	if p.onError != nil {
+		p.onError(r, failure)
+		return
+	}
+	slog.Default().Warn("fingerly proxy: upstream failed",
+		"status", failure.Status, "error", failure.Err.Error())
+}
+
+// isTimeout reports whether err is a deadline passing rather than a refusal,
+// reset or malformed answer.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // readUpstream reads the whole upstream answer, up to maxRelayBytes, before
@@ -351,10 +414,17 @@ func isHeaderSafe(value string) bool {
 	return true
 }
 
-// refuse writes a plain-text refusal that never reaches Fingerly.
+// refuse writes a short plain-text answer that names nobody.
 func refuse(w http.ResponseWriter, status int) {
+	text := http.StatusText(status)
+	switch status {
+	case http.StatusBadGateway:
+		text = "Bad gateway"
+	case http.StatusGatewayTimeout:
+		text = "Gateway timeout"
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, http.StatusText(status))
+	_, _ = io.WriteString(w, text)
 }
