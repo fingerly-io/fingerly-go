@@ -321,3 +321,63 @@ func TestReadsAreNeverRetried(t *testing.T) {
 		t.Fatalf("made %d requests, want 2", len(rec.requests))
 	}
 }
+
+func TestAPIErrorCarriesRetryAfter(t *testing.T) {
+	future := time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat)
+	for header, want := range map[string]any{"7": 7, "0": 0, future: 90, "": nil, "soon": nil, "-3": nil} {
+		rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+			if header != "" {
+				w.Header().Set("Retry-After", header)
+			}
+			w.Header().Set("X-Request-Id", "req-from-header")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("<html>not json</html>"))
+		})
+		_, err := testClient(rec).Events.Get(context.Background(), "id")
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("%q: error is %T", header, err)
+		}
+		switch want := want.(type) {
+		case nil:
+			if apiErr.RetryAfter != nil {
+				t.Errorf("%q: RetryAfter %d, want nil", header, *apiErr.RetryAfter)
+			}
+		case int:
+			// An HTTP date counts from now, so allow a second of drift.
+			if apiErr.RetryAfter == nil || *apiErr.RetryAfter < want-1 || *apiErr.RetryAfter > want {
+				t.Errorf("%q: RetryAfter %v, want %d", header, apiErr.RetryAfter, want)
+			}
+		}
+		if apiErr.RequestID != "req-from-header" || strings.Contains(err.Error(), "html") {
+			t.Errorf("%q: request id %q, message %q", header, apiErr.RequestID, err.Error())
+		}
+	}
+}
+
+func TestTransportFailuresAreConnectionErrors(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	url := closed.URL
+	closed.Close()
+	_, err := New(testSecretKey, WithEndpoint(url)).Events.Get(context.Background(), "id")
+	var connErr *ConnectionError
+	if !errors.As(err, &connErr) || connErr.Timeout || errors.Is(err, ErrTimeout) {
+		t.Fatalf("refused connection gave %T %v", err, err)
+	}
+
+	rec := newRecorder(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	_, err = testClient(rec, WithTimeout(50*time.Millisecond)).Events.Get(context.Background(), "id")
+	if !errors.As(err, &connErr) || !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout gave %T %v", err, err)
+	}
+}
+
+func TestOversizedAnswersAreRefused(t *testing.T) {
+	rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte(" "), maxResponseBody+1))
+	})
+	if _, err := testClient(rec).Events.Get(context.Background(), "id"); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("error is %v, want ErrResponseTooLarge", err)
+	}
+}

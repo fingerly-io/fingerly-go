@@ -3,15 +3,22 @@ package fingerly
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // maxErrorBody caps how much of a failed response is parsed for metadata. An
 // error body is small; anything larger is not one worth reading.
 const maxErrorBody = 1 << 20
+
+// maxResponseBody caps a successful answer. An event is a few kilobytes and a
+// page of them well under a megabyte.
+const maxResponseBody = 4 << 20
 
 // userAgent identifies the SDK build that made the request.
 var userAgent = "fingerly-go/" + Version
@@ -47,7 +54,7 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("fingerly: request failed: %w", c.redactError(err))
+		return nil, c.connectionError(err)
 	}
 	defer func() {
 		// Drain before closing so the connection returns to the pool.
@@ -58,11 +65,28 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return nil, c.apiError(response)
 	}
-	body, err := io.ReadAll(response.Body)
+	if response.ContentLength > maxResponseBody {
+		return nil, ErrResponseTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("fingerly: read response: %w", c.redactError(err))
+		return nil, c.connectionError(err)
+	}
+	if len(body) > maxResponseBody {
+		return nil, ErrResponseTooLarge
 	}
 	return body, nil
+}
+
+// connectionError wraps a transport failure in the SDK's own type, with the
+// key redacted from its message.
+func (c *Client) connectionError(err error) error {
+	timeout := errors.Is(err, context.DeadlineExceeded)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		timeout = true
+	}
+	return &ConnectionError{Timeout: timeout, cause: c.redactError(err)}
 }
 
 // apiError maps a failed response to a redacted *APIError.
@@ -70,7 +94,11 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 // Only the status and the structured fields the API documents are surfaced.
 // The raw body is deliberately dropped rather than echoed.
 func (c *Client) apiError(response *http.Response) *APIError {
-	apiErr := &APIError{Status: response.StatusCode}
+	apiErr := &APIError{
+		Status:     response.StatusCode,
+		RequestID:  c.redact(response.Header.Get("X-Request-Id")),
+		RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
+	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))
 	if err != nil {
@@ -82,7 +110,9 @@ func (c *Client) apiError(response *http.Response) *APIError {
 		return apiErr
 	}
 	apiErr.Code = c.redact(envelope.Error.Code)
-	apiErr.RequestID = c.redact(envelope.RequestID)
+	if envelope.RequestID != "" {
+		apiErr.RequestID = c.redact(envelope.RequestID)
+	}
 	if len(envelope.Error.Details) > 0 {
 		// Re-decoding the redacted text covers nested values without walking
 		// the tree.
@@ -108,5 +138,5 @@ func (c *Client) redactError(err error) error {
 	if err == nil || c.secretKey == "" || !strings.Contains(err.Error(), c.secretKey) {
 		return err
 	}
-	return fmt.Errorf("%s", c.redact(err.Error()))
+	return errors.New(c.redact(err.Error()))
 }
