@@ -152,3 +152,16 @@ func TestWebhookEventDecodesTheEnvelope(t *testing.T) {
 		t.Errorf("data is %+v", data)
 	}
 }
+
+func TestVerifyWebhookChecksAtMost32Signatures(t *testing.T) {
+	good := signWith("secret", webhookPayload)
+	decoy := signWith("decoy", webhookPayload)
+	within := strings.Repeat(decoy+",", maxSignatures-1) + good
+	past := strings.Repeat(decoy+",", maxSignatures) + good
+	if !VerifyWebhook("secret", webhookPayload, webhookTimestamp, within, WithWebhookTime(at(0))) {
+		t.Error("a match in the 32nd candidate was refused")
+	}
+	if VerifyWebhook("secret", webhookPayload, webhookTimestamp, past, WithWebhookTime(at(0))) {
+		t.Error("a match in the 33rd candidate was accepted")
+	}
+}

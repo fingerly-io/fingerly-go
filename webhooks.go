@@ -18,6 +18,11 @@ const DefaultWebhookTolerance = 5 * time.Minute
 
 const signaturePrefix = "sha256="
 
+// maxSignatures caps how many comma-separated candidates are checked. A
+// rotation sends two; a header with thousands is someone making the receiver
+// spend an HMAC compare on each.
+const maxSignatures = 32
+
 // signaturePattern matches a lowercase hex digest, exactly as Fingerly sends
 // it. Anchored with \A and \z because Go's $ also matches before a newline.
 var signaturePattern = regexp.MustCompile(`\Asha256=[a-f0-9]{64}\z`)
@@ -69,7 +74,8 @@ func WithWebhookTime(now time.Time) WebhookOption {
 //
 // Pass the exact bytes received, before any JSON decoding: re-encoding them
 // changes the digest. During a signing-secret rotation Fingerly sends several
-// comma-separated signatures, and any one matching is accepted.
+// comma-separated signatures, and any one of the first 32 matching is
+// accepted.
 //
 //	body, _ := io.ReadAll(r.Body)
 //	ok := fingerly.VerifyWebhook(secret, body,
@@ -94,7 +100,10 @@ func VerifyWebhook(secret string, payload []byte, timestamp, signature string, o
 	}
 
 	expected := signPayload(secret, timestamp, payload)
-	for _, candidate := range strings.Split(signature, ",") {
+	for i, candidate := range strings.SplitN(signature, ",", maxSignatures+1) {
+		if i == maxSignatures {
+			break
+		}
 		if matchesSignature(candidate, expected) {
 			return true
 		}
