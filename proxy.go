@@ -58,7 +58,9 @@ type ProxyOptions struct {
 	// Timeout bounds the upstream call. Defaults to 5 seconds.
 	Timeout time.Duration
 	// Transport supplies the upstream round tripper, for tests or a custom
-	// HTTP stack. Redirects are never followed either way.
+	// HTTP stack. Left nil, the SDK's shared connection pool is used, sized
+	// for hundreds of requests in flight. Redirects are never followed either
+	// way.
 	Transport http.RoundTripper
 }
 
@@ -160,9 +162,13 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	if _, err := positiveDuration(timeout, "Timeout"); err != nil {
 		return nil, err
 	}
+	transport := options.Transport
+	if transport == nil {
+		transport = sharedPool
+	}
 	proxy.httpClient = &http.Client{
 		Timeout:   timeout,
-		Transport: options.Transport,
+		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

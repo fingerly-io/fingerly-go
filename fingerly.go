@@ -74,8 +74,10 @@ func WithTimeout(timeout time.Duration) Option {
 // WithHTTPClient supplies the HTTP client, for a custom transport or for tests.
 //
 // The client is copied and its CheckRedirect replaced, so a redirect can never
-// replay the secret key to another host. The Transport is shared, so
-// connection pooling is preserved.
+// replay the secret key to another host. Its Transport is used as given; a nil
+// Transport means the SDK's shared connection pool rather than
+// http.DefaultTransport, which keeps too few idle connections for a busy
+// server.
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *clientConfig) { c.httpClient = httpClient }
 }
@@ -134,6 +136,9 @@ func noRedirectClient(base *http.Client) *http.Client {
 	if base != nil {
 		copied := *base
 		client = &copied
+	}
+	if client.Transport == nil {
+		client.Transport = sharedPool
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
