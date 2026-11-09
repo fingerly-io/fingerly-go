@@ -1,9 +1,7 @@
 # fingerly-go
 
 Server-side event reads, webhook verification and a same-origin proxy for Go.
-Go 1.22 or newer. No dependencies outside the standard library. Version 0.1.0
-is prepared for release; the repository is private and the module has not been
-published.
+Go 1.22 or newer. No dependencies outside the standard library.
 
 ```sh
 go get github.com/fingerly-io/fingerly-go
