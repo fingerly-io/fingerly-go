@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1
+
+- Security: `Events.Get` refuses an empty request id, `.` and `..` with
+  `ErrInvalidRequestID` before sending anything. Percent-escaping leaves dots
+  alone and servers and proxies resolve dot segments, so `..` reached a route
+  above `/events` with the secret key attached, and `""` or `.` read the event
+  list, which a caller could take for one event. The request id usually comes
+  from the browser, so a visitor could choose it. Ids that merely contain a
+  dot, such as `a.b`, are sent as before.
+
+## 0.1.0
 
 First release: event reads, webhook verification and the same-origin proxy.
 Changes made during pre-release testing:

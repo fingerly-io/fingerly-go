@@ -133,6 +133,39 @@ func TestListSendsWindowBoundsInUTC(t *testing.T) {
 // A missing event is a request id that was never issued or is past
 // retention. It is reported at once, in one request, rather than waited
 // through.
+// A dot segment survives percent-escaping and is resolved by servers and
+// proxies, so "" and "." would read the list and ".." a route above /events,
+// secret key attached. Each is refused before anything is sent.
+func TestGetRefusesIDsThatAreNotOneEvent(t *testing.T) {
+	for _, id := range []string{"", ".", ".."} {
+		rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(nil)))
+		event, err := testClient(rec).Events.Get(context.Background(), id)
+		if !errors.Is(err, ErrInvalidRequestID) {
+			t.Errorf("id %q: error is %v, want ErrInvalidRequestID", id, err)
+		}
+		if event != nil {
+			t.Errorf("id %q: returned an event", id)
+		}
+		if len(rec.requests) != 0 {
+			t.Errorf("id %q: made %d requests, want 0", id, len(rec.requests))
+		}
+	}
+}
+
+// An id that only contains dots among other characters is an ordinary id.
+func TestGetSendsAnIDContainingADot(t *testing.T) {
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(nil)))
+	if _, err := testClient(rec).Events.Get(context.Background(), "a.b"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(rec.requests) != 1 {
+		t.Fatalf("made %d requests, want 1", len(rec.requests))
+	}
+	if got := rec.requests[0].URL.EscapedPath(); got != "/api/v1/events/a.b" {
+		t.Errorf("path is %q", got)
+	}
+}
+
 func TestGetReportsAMissingEventWithoutRetrying(t *testing.T) {
 	var calls int
 	rec := newRecorder(t, func(w http.ResponseWriter, r *http.Request) {

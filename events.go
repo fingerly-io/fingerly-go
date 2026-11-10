@@ -21,7 +21,17 @@ type EventsService struct {
 // event is not recorded yet; APIError.RetryAfter says when to try again. One
 // matching ErrEventNotFound means it was never issued or is past retention.
 // Neither is retried.
+//
+// An empty request id, "." or ".." returns ErrInvalidRequestID without
+// sending anything.
 func (s *EventsService) Get(ctx context.Context, requestID string) (*Event, error) {
+	// URL parsers resolve a dot segment even when it is percent-encoded, so
+	// escaping cannot keep these in the path: "" and "." would name the list
+	// route, and ".." a route above it, with the secret key attached.
+	switch requestID {
+	case "", ".", "..":
+		return nil, ErrInvalidRequestID
+	}
 	body, err := s.client.get(ctx, "/events/"+url.PathEscape(requestID))
 	if err != nil {
 		return nil, err

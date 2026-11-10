@@ -25,6 +25,11 @@ var ErrEventNotFound = errors.New("fingerly: event not found")
 // Compare with errors.Is; the concrete error is always an *APIError.
 var ErrEventPending = errors.New("fingerly: event pending")
 
+// ErrInvalidRequestID is returned by EventsService.Get, before any request is
+// made, for a request id that cannot name one event: the empty string, "."
+// or "..". The id usually comes from the browser, so treat it as bad input.
+var ErrInvalidRequestID = errors.New("fingerly: request id is not a Fingerly request id")
+
 // APIError is returned for any non-2xx response from the Fingerly API.
 //
 // The message carries only the HTTP status. Response bodies are never echoed,
