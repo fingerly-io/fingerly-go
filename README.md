@@ -232,12 +232,15 @@ func main() {
 
 Trust that header only when traffic can reach the server through that load
 balancer or CDN alone; otherwise a visitor can set it. `Proxy` implements
-`http.Handler`, so every Go router takes it directly:
+`http.Handler`, so every router built on net/http takes it directly, and fiber
+through its adaptor:
 
 ```go
-router.Handle("/k7x2qm4a", proxy)         // gorilla/mux
-r.Handle("/k7x2qm4a", proxy)              // chi
-router.Any("/k7x2qm4a", gin.WrapH(proxy)) // gin
+router.Handle("/k7x2qm4a", proxy)                // gorilla/mux
+r.Handle("/k7x2qm4a", proxy)                     // chi
+router.Any("/k7x2qm4a", gin.WrapH(proxy))        // gin
+e.Any("/k7x2qm4a", echo.WrapHandler(proxy))      // echo
+app.All("/k7x2qm4a", adaptor.HTTPHandler(proxy)) // fiber
 ```
 
 Then point the browser SDK at the same path. It posts both of its calls there,
@@ -276,7 +279,13 @@ passes the browser gets `504`; any other upstream failure (refused, reset, DNS,
 a truncated or malformed answer, an answer over 4 MiB) gets `502`. Both carry a
 short `text/plain` body and `Cache-Control: no-store`. The answer is read in
 full before anything is written, so a broken upstream never reaches the browser
-as a `200`. A visitor who disconnects cancels the upstream call.
+as a `200`. A visitor who disconnects cancels the upstream call, except under
+fiber, whose adaptor has no disconnect signal, so the call runs to `Timeout`.
+
+`Timeout` bounds the upstream call, not the visitor's upload: a client that
+trickles its request body holds a handler until your `http.Server` gives up, so
+set `ReadHeaderTimeout` and `ReadTimeout` on it. A bare `http.ListenAndServe`
+has neither.
 
 Each failure is reported once: to `ProxyOptions.OnError` if you set it,
 otherwise as one line through `slog.Default()`.

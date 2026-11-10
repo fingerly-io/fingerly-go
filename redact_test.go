@@ -1,6 +1,8 @@
 package fingerly
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -17,7 +19,7 @@ func TestPrintingSDKValuesNeverShowsAKey(t *testing.T) {
 	}
 	client := New(testSecretKey)
 	values := map[string]any{
-		"*Proxy": proxy, "*Client": client, "Client": *client,
+		"*Proxy": proxy, "Proxy": *proxy, "*Client": client, "Client": *client,
 		"ProxyOptions": options, "*ProxyOptions": &options, "Events": client.Events,
 	}
 	for name, value := range values {
@@ -41,5 +43,25 @@ func TestPrintingSDKValuesNeverShowsAKey(t *testing.T) {
 	}
 	if !strings.Contains(fmt.Sprintf("%v", options), "[redacted]") {
 		t.Errorf("options do not show the key as redacted")
+	}
+}
+
+// gob copies exported string fields and skips the callbacks, so without a
+// refusal the options would serialise with their keys in the clear.
+func TestSerialisingKeysIsRefused(t *testing.T) {
+	options := ProxyOptions{ProxyKey: testProxyKey, ClientIP: func(*http.Request) string { return "" }}
+	var encoded bytes.Buffer
+	if err := gob.NewEncoder(&encoded).Encode(options); err == nil {
+		t.Errorf("ProxyOptions was serialised")
+	}
+	if strings.Contains(encoded.String(), testProxyKey) {
+		t.Errorf("the proxy key was serialised")
+	}
+	encoded.Reset()
+	if err := gob.NewEncoder(&encoded).Encode(New(testSecretKey)); err == nil {
+		t.Errorf("a Client was serialised")
+	}
+	if strings.Contains(encoded.String(), testSecretKey) {
+		t.Errorf("the secret key was serialised")
 	}
 }

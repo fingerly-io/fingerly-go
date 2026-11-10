@@ -87,7 +87,8 @@ type ProxyOptions struct {
 // Proxy serves the browser SDK from a path on your own domain, so content
 // blockers cannot refuse its calls as third-party.
 //
-// It implements http.Handler, so every Go router takes it directly:
+// It implements http.Handler, so every router built on net/http takes it
+// directly:
 //
 //	proxy, err := fingerly.NewProxy(fingerly.ProxyOptions{
 //		ProxyKey: os.Getenv("FINGERLY_PROXY_KEY"),
@@ -111,8 +112,9 @@ type Proxy struct {
 	clientIP     func(*http.Request) string
 	httpClient   *http.Client
 	onError      func(*http.Request, *ProxyError)
-	// badClientIP reports an invalid ClientIP once, not once per request.
-	badClientIP sync.Once
+	// badClientIP reports an invalid ClientIP once, not once per request. A
+	// pointer so that Proxy has no lock to copy and Format can take a value.
+	badClientIP *sync.Once
 }
 
 // errNoClientIP is the configuration error for a ClientIP that returned
@@ -156,6 +158,7 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 		clientIP:     options.ClientIP,
 		maxBodyBytes: defaultMaxBodyBytes,
 		onError:      options.OnError,
+		badClientIP:  &sync.Once{},
 	}
 	proxy.key = options.ProxyKey
 	kind := keyProxy
@@ -279,6 +282,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.fail(w, r, err)
 		return
 	}
+	// http.Transport accepts any three digits as a status, and WriteHeader
+	// panics on a code under 100. Nothing outside 2xx to 5xx is an answer.
+	if response.StatusCode < 200 || response.StatusCode > 599 {
+		_ = response.Body.Close()
+		p.fail(w, r, fmt.Errorf("upstream answered status %d", response.StatusCode))
+		return
+	}
 	upstreamBody, err := readUpstream(response)
 	_ = response.Body.Close()
 	if err != nil {
@@ -288,11 +298,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.relay(w, response, upstreamBody)
 }
 
-// fail answers an upstream failure: 504 when the deadline passed, 502 for
-// anything else. A visitor who went away gets nothing: the upstream call was
-// cancelled with their request, and there is no one left to answer.
+// fail answers an upstream failure: 504 when a deadline passed, whether this
+// proxy's or one a middleware put on the request, and 502 for anything else. A
+// visitor who went away gets nothing: the upstream call was cancelled with
+// their request, and there is no one left to answer.
 func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, err error) {
-	if r.Context().Err() != nil {
+	if errors.Is(r.Context().Err(), context.Canceled) {
 		return
 	}
 	status := http.StatusBadGateway

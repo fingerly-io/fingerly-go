@@ -2,6 +2,7 @@ package fingerly
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -15,8 +16,9 @@ func (c Client) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, "fingerly.Client{secretKey:"+redacted+" baseURL:"+c.baseURL+"}")
 }
 
-// Format keeps the proxy key out of every fmt verb.
-func (p *Proxy) Format(f fmt.State, _ rune) {
+// Format keeps the proxy key out of every fmt verb. A value receiver, so that
+// printing a dereferenced Proxy is covered too.
+func (p Proxy) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, "fingerly.Proxy{key:"+redacted+" path:"+p.path+" upstream:"+p.upstreamURL+"}")
 }
 
@@ -39,6 +41,12 @@ func (o ProxyOptions) MarshalJSON() ([]byte, error) {
 		"MaxBodyBytes": o.MaxBodyBytes,
 		"Timeout":      o.Timeout.String(),
 	})
+}
+
+// GobEncode refuses to serialise the options: gob skips the callbacks but
+// would copy the keys in the clear.
+func (o ProxyOptions) GobEncode() ([]byte, error) {
+	return nil, errors.New("fingerly: ProxyOptions cannot be serialised")
 }
 
 func redactIfSet(value string) string {

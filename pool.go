@@ -1,6 +1,7 @@
 package fingerly
 
 import (
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -66,7 +67,23 @@ func (t *rotatingTransport) RoundTrip(request *http.Request) (*http.Response, er
 // timeouts, HTTP/2 support and environment proxy settings, and sizes the idle
 // pool for a busy server.
 func newPooledTransport() *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Instrumentation and test libraries replace the default with a
+		// wrapper. Use the same settings net/http ships with.
+		base = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
+	transport := base.Clone()
 	transport.MaxIdleConns = poolIdleTotal
 	transport.MaxIdleConnsPerHost = poolIdlePerHost
 	return transport

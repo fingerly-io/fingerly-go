@@ -15,6 +15,10 @@ Changes made during pre-release testing:
 - The proxy answers `504` when its deadline passes and `502` for any other
   upstream failure, and reports each one to `ProxyOptions.OnError` or as one
   `slog` line. A visitor who disconnects cancels the upstream call quietly.
+- A deadline a middleware put on the request is now answered `504` rather than
+  an empty `200`, an upstream status outside 2xx to 5xx is a `502` rather than
+  a panic, and the pool no longer panics when `http.DefaultTransport` has been
+  replaced by a wrapper.
 - `ClientIP` must return exactly one IPv4 or IPv6 address; anything else is
   answered `500` without calling upstream and reported once.
 - The proxy path is matched exactly: no trailing slash, dot segment, encoded

@@ -30,9 +30,30 @@ func TestDefaultsShareOnePooledTransport(t *testing.T) {
 	}
 }
 
+type replacedTransport struct{ http.RoundTripper }
+
+// Instrumentation and test libraries replace http.DefaultTransport with a
+// wrapper; the pool must not assume its concrete type.
+func TestPoolSurvivesAReplacedDefaultTransport(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = replacedTransport{original}
+
+	transport := newPooledTransport()
+	if transport.MaxIdleConnsPerHost != poolIdlePerHost {
+		t.Errorf("MaxIdleConnsPerHost is %d", transport.MaxIdleConnsPerHost)
+	}
+	if transport.ForceAttemptHTTP2 != true || transport.Proxy == nil {
+		t.Errorf("the fallback lost the standard transport's settings")
+	}
+}
+
 // TestConcurrentRequestsReuseConnections is the regression for the field
 // test: 200 requests in flight through http.DefaultTransport opened a socket
-// for most of them.
+// for most of them. Starting cold, the count is not stable: each request that
+// finds no idle connection dials its own, and a dial overtaken by a connection
+// coming back still lands in the pool, so 200 at once can open 350. Only what
+// happens once the pool is warm says whether connections are reused.
 func TestConcurrentRequestsReuseConnections(t *testing.T) {
 	var conns atomic.Int64
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -53,28 +74,36 @@ func TestConcurrentRequestsReuseConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const inFlight, rounds = 200, 10
-	var wg sync.WaitGroup
-	for g := 0; g < inFlight; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < rounds; i++ {
-				request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
-				request.Header.Set("X-API-Key", testPublicKey)
-				request.Header.Set("Origin", "https://shop.test")
-				recorder := httptest.NewRecorder()
-				proxy.ServeHTTP(recorder, request)
-				if recorder.Code != http.StatusOK {
-					t.Errorf("status %d", recorder.Code)
-					return
+	const inFlight, warmUp, rounds = 200, 5, 10
+	load := func(rounds int) {
+		var wg sync.WaitGroup
+		for g := 0; g < inFlight; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < rounds; i++ {
+					request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
+					request.Header.Set("X-API-Key", testPublicKey)
+					request.Header.Set("Origin", "https://shop.test")
+					recorder := httptest.NewRecorder()
+					proxy.ServeHTTP(recorder, request)
+					if recorder.Code != http.StatusOK {
+						t.Errorf("status %d", recorder.Code)
+						return
+					}
 				}
-			}
-		}()
+			}()
+		}
+		wg.Wait()
 	}
-	wg.Wait()
-	if got := conns.Load(); got > inFlight*3/2 {
-		t.Errorf("%d requests opened %d connections; expected about %d", inFlight*rounds, got, inFlight)
+	load(warmUp)
+	warm := conns.Load()
+	load(rounds)
+	// A pool that keeps only two idle connections opens well over 500 here; a
+	// warm one opens almost none, about a hundred at worst under the race
+	// detector, whose slower scheduling lets more dials race.
+	if opened := conns.Load() - warm; opened > inFlight {
+		t.Errorf("%d requests on a warm pool opened %d connections; expected almost none", inFlight*rounds, opened)
 	}
 }
 

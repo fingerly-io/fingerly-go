@@ -546,3 +546,62 @@ func TestProxyEndsQuietlyWhenTheVisitorDisconnects(t *testing.T) {
 		t.Errorf("a disconnect was reported (%d) or answered (%q)", reported, recorder.Body.String())
 	}
 }
+
+// A deadline middleware only sets a deadline on the request context. Nothing
+// else writes the answer, and a handler that writes nothing is a 200.
+func TestProxyAnswersARequestDeadlineAsATimeout(t *testing.T) {
+	rec := newRecorder(t, func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	var reported []*ProxyError
+	proxy, err := NewProxy(ProxyOptions{
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+		ClientIP: func(*http.Request) string { return "203.0.113.5" },
+		OnError:  func(_ *http.Request, failure *ProxyError) { reported = append(reported, failure) },
+	})
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, proxyPath, strings.NewReader("{}")).WithContext(ctx)
+	for name, value := range browserHeaders() {
+		request.Header.Set(name, value)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusGatewayTimeout || recorder.Body.String() != "Gateway timeout" {
+		t.Errorf("status %d body %q, want 504", recorder.Code, recorder.Body.String())
+	}
+	if len(reported) != 1 || reported[0].Status != http.StatusGatewayTimeout {
+		t.Errorf("OnError got %v", reported)
+	}
+}
+
+// http.Transport accepts any three digits as a status, and WriteHeader panics
+// on a code under 100, so a broken upstream must not reach it.
+func TestProxyAnswersAnUnrelayableUpstreamStatusAsBadGateway(t *testing.T) {
+	for _, status := range []string{"099 Odd", "101 Switching Protocols", "999 Odd"} {
+		rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer connection.Close()
+			_, _ = connection.Write([]byte("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\n\r\n"))
+		})
+		proxy, err := NewProxy(ProxyOptions{
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+			ClientIP: func(*http.Request) string { return "203.0.113.5" },
+			OnError:  func(*http.Request, *ProxyError) {},
+		})
+		if err != nil {
+			t.Fatalf("NewProxy: %v", err)
+		}
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+		if response.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s: status %d, want 502", status, response.StatusCode)
+		}
+	}
+}
