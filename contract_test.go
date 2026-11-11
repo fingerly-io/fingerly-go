@@ -104,6 +104,9 @@ func TestReadsEveryEventFixture(t *testing.T) {
 			if event.VisitorID != want["visitor_id"] {
 				t.Errorf("visitor id is %q", event.VisitorID)
 			}
+			if wantProject, _ := want["project_id"].(string); event.ProjectID != wantProject {
+				t.Errorf("project id is %q, want %q", event.ProjectID, wantProject)
+			}
 			// A fixture without a score must not decode as zero.
 			score, scored := event.Score()
 			if raw, present := want["suspect_score"]; !present || raw == nil {
@@ -150,6 +153,9 @@ func TestReadsEveryPageFixture(t *testing.T) {
 			for i, row := range page.Rows {
 				if row.RequestID != want.Rows[i]["request_id"] {
 					t.Errorf("row %d request id is %q", i, row.RequestID)
+				}
+				if wantProject, _ := want.Rows[i]["project_id"].(string); row.ProjectID != wantProject {
+					t.Errorf("row %d project id is %q, want %q", i, row.ProjectID, wantProject)
 				}
 			}
 		})

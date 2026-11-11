@@ -21,7 +21,10 @@ type EventTrigger struct {
 // as zero: an ordinary visitor about whom nothing fired scores 0, while a
 // submission that was never enriched has no score at all.
 type Event struct {
-	RequestID  string    `json:"request_id"`
+	RequestID string `json:"request_id"`
+	// ProjectID is the Fingerly project the event belongs to. Empty when the
+	// server predates projects and did not send it.
+	ProjectID  string    `json:"project_id,omitempty"`
 	VisitorID  string    `json:"visitor_id"`
 	OccurredAt time.Time `json:"occurred_at"`
 	// State is "enriched", or "unavailable" when the network lookup could not run.
