@@ -114,6 +114,12 @@ that it is recent, that its environment is correct, and that it was scored.
 Apply your own policy to the server's verdict. Do not authorize an action using
 scores or visitor identifiers supplied by the browser. Tags correlate events;
 they do not replace your application's authentication or replay protection.
+Never put a personal identifier (user ID, email, install ID, advertising ID) in
+a tag: the server keeps tag values in long-lived rollups.
+
+`Event.ProjectID` is the Fingerly project the event belongs to, on both
+`Events.Get` and every row of `Events.List`. It is empty when an older server
+does not send it.
 
 ```go
 package main
@@ -183,6 +189,9 @@ Malformed or missing input is a false result, never a panic.
 
 `WebhookEvent` decodes the envelope every delivery shares and leaves `Data`
 raw, so a new event type needs no SDK upgrade.
+The `identification.completed` and `visitor.suspect` payloads carry
+`data.project_id`, the project the event belongs to; `identification.refused`
+carries it only when the refused request named a known key.
 
 ## Same-origin proxy
 
