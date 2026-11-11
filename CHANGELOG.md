@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `Event.IPAddress` is replaced by `Event.IPNetwork`: the API now returns the
+  network a request came from (an IPv4 /24 or an IPv6 /40), never the address.
+  `Event.DeferredSignals` is removed, as the API no longer returns the deferred
+  report. `Event.Document` is now an allow-listed view of the archived
+  submission, without raw signals, user agent or address.
+
 ## 0.1.1
 
 - Security: `Events.Get` refuses an empty request id, `.` and `..` with

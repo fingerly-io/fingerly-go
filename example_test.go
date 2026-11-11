@@ -40,7 +40,7 @@ func ExampleEventsService_List() {
 		log.Fatal(err)
 	}
 	for _, event := range page.Rows {
-		fmt.Println(event.RequestID, event.IPAddress)
+		fmt.Println(event.RequestID, event.IPNetwork)
 	}
 }
 
