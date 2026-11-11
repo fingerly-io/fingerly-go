@@ -11,6 +11,7 @@
   `Event.DeferredSignals` is removed, as the API no longer returns the deferred
   report. `Event.Document` is now an allow-listed view of the archived
   submission, without raw signals, user agent or address.
+- The vendored contract snapshot is refreshed.
 
 ## 0.1.1
 
