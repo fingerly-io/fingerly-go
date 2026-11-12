@@ -21,7 +21,10 @@ type EventTrigger struct {
 // as zero: an ordinary visitor about whom nothing fired scores 0, while a
 // submission that was never enriched has no score at all.
 type Event struct {
-	RequestID  string    `json:"request_id"`
+	RequestID string `json:"request_id"`
+	// ProjectID is the Fingerly project the event belongs to. Empty when the
+	// server predates projects and did not send it.
+	ProjectID  string    `json:"project_id,omitempty"`
 	VisitorID  string    `json:"visitor_id"`
 	OccurredAt time.Time `json:"occurred_at"`
 	// State is "enriched", or "unavailable" when the network lookup could not run.
@@ -41,7 +44,10 @@ type Event struct {
 	// Tag is your own reference, as the client sent it.
 	Tag string `json:"tag,omitempty"`
 
-	IPAddress   string `json:"ip_address"`
+	// IPNetwork is the network the request came from: an IPv4 /24 or an IPv6
+	// /40, such as 203.0.113.0/24. The API never returns the address itself.
+	// Empty when unknown.
+	IPNetwork   string `json:"ip_network,omitempty"`
 	CountryCode string `json:"country_code,omitempty"`
 	CountryName string `json:"country_name,omitempty"`
 	ASN         string `json:"asn,omitempty"`
@@ -68,13 +74,13 @@ type Event struct {
 	// HasDocument says whether the full submission was archived.
 	HasDocument bool `json:"has_document"`
 
-	// Document is the archived submission with the threshold and weights that
-	// scored it. Present when HasDocument is true and the archive could be
-	// read. Its contents are deliberately opaque, not a public contract.
+	// Document is an allow-listed view of the archived submission: schema,
+	// request id, time, SDK platform and version, IP network, the classified
+	// IP (network, city-level location, detections) or IP error, risk,
+	// attestation and velocity flags. It carries no raw signals, no user agent
+	// and no IP address. Present when HasDocument is true and the archive could
+	// be read. Its contents are deliberately opaque, not a public contract.
 	Document json.RawMessage `json:"document,omitempty"`
-	// DeferredSignals is the deferred report attached to this request, when one
-	// arrived. Also opaque.
-	DeferredSignals json.RawMessage `json:"deferred_signals,omitempty"`
 
 	// Raw is the response body exactly as it arrived, so a field the API adds
 	// after this SDK was released is still reachable without an upgrade.

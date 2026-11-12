@@ -43,6 +43,57 @@ func TestGetDecodesAnEventAndKeepsTheRawBody(t *testing.T) {
 	}
 }
 
+func TestGetDecodesTheProjectID(t *testing.T) {
+	const project = "0199a963-e400-7000-8000-0000000000a1"
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(map[string]any{
+		"project_id": project,
+	})))
+	event, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.ProjectID != project {
+		t.Errorf("project id is %q, want %q", event.ProjectID, project)
+	}
+}
+
+func TestGetAcceptsAnEventWithoutAProjectID(t *testing.T) {
+	// An older server does not send project_id at all.
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(nil)))
+	event, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.ProjectID != "" {
+		t.Errorf("project id is %q, want empty", event.ProjectID)
+	}
+	if event.RequestID != testRequestID {
+		t.Errorf("request id is %q", event.RequestID)
+	}
+}
+
+func TestListDecodesTheProjectIDOfEachRow(t *testing.T) {
+	const project = "0199a963-e400-7000-8000-0000000000a1"
+	rec := newRecorder(t, respondJSON(http.StatusOK, map[string]any{
+		"rows": []any{
+			eventBody(map[string]any{"project_id": project}),
+			eventBody(nil),
+		},
+		"page":      1,
+		"page_size": 50,
+	}))
+	page, err := testClient(rec).Events.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Rows) != 2 {
+		t.Fatalf("decoded %d rows, want 2", len(page.Rows))
+	}
+	if page.Rows[0].ProjectID != project || page.Rows[1].ProjectID != "" {
+		t.Errorf("project ids are %q and %q", page.Rows[0].ProjectID, page.Rows[1].ProjectID)
+	}
+}
+
 func TestUnscoredEventIsDistinctFromZero(t *testing.T) {
 	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(map[string]any{
 		"suspect_score": nil,
