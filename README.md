@@ -280,7 +280,7 @@ The browser must present a public key from the same environment as the proxy
 key, or the request gets `401`. Bodies over 1 MiB get `413`. Only the content
 type, the visitor metadata Fingerly needs, and an `Idempotency-Key` are
 forwarded; customer cookies and authorization headers never are. The proxy
-reports itself upstream as `go/0.1.1`, which the dashboard shows per proxy.
+reports itself upstream as `go/0.2.0`, which the dashboard shows per proxy.
 
 One deadline, `Timeout` (5 seconds by default), covers the whole upstream
 exchange, body included, so a trickling answer cannot stretch it. When it
