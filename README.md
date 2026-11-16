@@ -293,7 +293,9 @@ optional: leave it empty when the route already sends only that path to the
 handler, and behind `http.StripPrefix`, which changes the path the handler
 sees. It must be an absolute path such as `/k7x2qm4a`, or `NewProxy` returns
 an error. Only `POST` (plus `OPTIONS` when `AllowedOrigins` is configured) is
-accepted; any other method gets `405`.
+accepted, compared case-sensitively; any other method, `post` included, gets
+`405`. Every answer the proxy writes itself, `404` and `405` included, carries
+`Cache-Control: no-store`.
 
 Every forwarded request goes with its raw body bytes untouched (never JSON
 re-encoded) to one URL, `https://api.fingerly.io/api/v1/ingest` (`APIVersion`

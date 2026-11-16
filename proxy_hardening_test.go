@@ -3,6 +3,7 @@ package fingerly
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -125,5 +126,41 @@ func TestProxyAnswersAnUpstreamStatusOutsideTheRangeAsBadGateway(t *testing.T) {
 		if response.StatusCode != http.StatusBadGateway || response.Header.Get("Cache-Control") != "no-store" {
 			t.Errorf("%s: status %d, Cache-Control %q", status, response.StatusCode, response.Header.Get("Cache-Control"))
 		}
+	}
+}
+
+func TestProxyMethodIsCaseSensitiveAndEveryRefusalIsUncacheable(t *testing.T) {
+	proxy, rec := newProxy(t, func(o *ProxyOptions) { o.AllowedOrigins = []string{"https://shop.test"} })
+	for _, c := range []struct {
+		method, path string
+		status       int
+	}{
+		{"post", proxyPath, http.StatusMethodNotAllowed},
+		{"Post", proxyPath, http.StatusMethodNotAllowed},
+		{"options", proxyPath, http.StatusMethodNotAllowed},
+		{http.MethodGet, proxyPath, http.StatusMethodNotAllowed},
+		{http.MethodPut, proxyPath, http.StatusMethodNotAllowed},
+		{http.MethodPost, proxyPath + "/", http.StatusNotFound},
+		{http.MethodPost, "/" + proxyPath, http.StatusNotFound},
+		{http.MethodPost, proxyPath + "/..", http.StatusNotFound},
+		{http.MethodPost, "/k7x2qm4%61", http.StatusNotFound},
+		{http.MethodPost, "/K7X2QM4A", http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(http.MethodPost, c.path, strings.NewReader("{}"))
+		request.Method = c.method
+		for name, value := range browserHeaders() {
+			request.Header.Set(name, value)
+		}
+		recorder := httptest.NewRecorder()
+		proxy.ServeHTTP(recorder, request)
+		if recorder.Code != c.status {
+			t.Errorf("%s %s: status %d, want %d", c.method, c.path, recorder.Code, c.status)
+		}
+		if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s %s: Cache-Control %q", c.method, c.path, got)
+		}
+	}
+	if len(rec.requests) != 0 {
+		t.Errorf("%d refused requests reached upstream", len(rec.requests))
 	}
 }
