@@ -367,8 +367,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// http.Transport accepts any three digits as a status, and WriteHeader
-	// panics on a code under 100. Nothing outside 2xx to 5xx is an answer.
-	if response.StatusCode < 200 || response.StatusCode > 599 {
+	// panics on a code under 100. Nothing outside 2xx to 5xx is an answer, and
+	// the API never redirects: a 3xx is a wrong or tampered upstream.
+	if response.StatusCode < 200 || response.StatusCode > 599 ||
+		(response.StatusCode >= 300 && response.StatusCode < 400) {
 		_ = response.Body.Close()
 		p.fail(w, r, fmt.Errorf("upstream answered status %d", response.StatusCode))
 		return

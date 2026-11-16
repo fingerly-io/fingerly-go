@@ -2,6 +2,8 @@ package fingerly
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -60,5 +62,42 @@ func TestNewProxyAcceptsOnlyABareHTTPSUpstream(t *testing.T) {
 	}
 	if _, err := build("https://upstream.invalid", false); err != nil {
 		t.Errorf("https upstream refused: %v", err)
+	}
+}
+
+// The API never redirects. A 3xx is answered 502 and its target is never
+// called, with the SDK's pool or a caller-supplied transport.
+func TestProxyAnswersARedirectAsBadGatewayAndNeverFollowsIt(t *testing.T) {
+	var reached atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+	}))
+	defer target.Close()
+	for _, status := range []int{301, 302, 303, 307, 308, 300, 304} {
+		for _, transport := range []http.RoundTripper{nil, &http.Transport{}} {
+			rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", target.URL+"/collect")
+				w.WriteHeader(status)
+			})
+			proxy, err := NewProxy(ProxyOptions{
+				ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
+				ClientIP:  func(*http.Request) string { return "203.0.113.5" },
+				OnError:   func(*http.Request, *ProxyError) {},
+				Transport: transport,
+			})
+			if err != nil {
+				t.Fatalf("NewProxy: %v", err)
+			}
+			response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+			if response.StatusCode != http.StatusBadGateway {
+				t.Errorf("%d: status %d, want 502", status, response.StatusCode)
+			}
+			if response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Location") != "" {
+				t.Errorf("%d: headers %v", status, response.Header)
+			}
+		}
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("the redirect target was called %d times", n)
 	}
 }
