@@ -1,6 +1,7 @@
 package fingerly
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -70,6 +71,29 @@ func normalizeOrigin(value string) (string, error) {
 		)
 	}
 	return strings.TrimRight(value, "/"), nil
+}
+
+// normalizeUpstream validates the proxy's upstream origin. HTTPS is required;
+// plain HTTP is accepted only for 127.0.0.1, localhost or [::1], and only when
+// allowInsecureLoopback is set for a local test harness.
+func normalizeUpstream(value string, allowInsecureLoopback bool) (string, error) {
+	origin, err := normalizeOrigin(value)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "http" {
+		host := parsed.Hostname()
+		if !allowInsecureLoopback || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+			return "", errors.New(
+				"fingerly: a plain http:// Upstream is allowed only for 127.0.0.1, localhost or [::1] with AllowInsecureLoopback",
+			)
+		}
+	}
+	return origin, nil
 }
 
 // normalizeAPIVersion validates a route version before it is put in a URL.

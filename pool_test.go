@@ -69,7 +69,7 @@ func TestConcurrentRequestsReuseConnections(t *testing.T) {
 	server.Start()
 	defer server.Close()
 
-	proxy, err := NewProxy(ProxyOptions{ProxyKey: testProxyKey, Upstream: server.URL,
+	proxy, err := NewProxy(ProxyOptions{ProxyKey: testProxyKey, Upstream: server.URL, AllowInsecureLoopback: true,
 		ClientIP: func(*http.Request) string { return "203.0.113.5" }})
 	if err != nil {
 		t.Fatal(err)

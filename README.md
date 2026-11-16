@@ -300,6 +300,11 @@ re-encoded) to one URL, `https://api.fingerly.io/api/v1/ingest` (`APIVersion`
 and `Upstream` change its version and origin). Event reads need a secret key and
 stay unreachable from a browser by construction.
 
+`Upstream` must use `https://`, or `NewProxy` returns an error. A plain
+`http://` upstream is accepted only for `127.0.0.1`, `localhost` or `[::1]`,
+and only with `AllowInsecureLoopback: true`, which is meant for a local test
+harness.
+
 The caller must present a public key from the same environment as the proxy
 key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
 sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are
@@ -307,7 +312,10 @@ stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact
 lowercase native or bridge platform (`ios`, `android`, `react-native`,
 `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`,
 `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`,
-`kotlin-multiplatform`). When both `Origin` and a validated
+`kotlin-multiplatform`). A request carries one channel upstream: with an
+`Origin` it goes as a browser request (`X-Fingerly-Origin`) and the platform
+header is not forwarded; without one, the validated platform is. When both
+`Origin` and a validated
 `X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400`
 (`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`,
 `Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified

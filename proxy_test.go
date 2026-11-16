@@ -28,6 +28,8 @@ func newProxy(t *testing.T, apply func(*ProxyOptions)) (*Proxy, *recorder) {
 		Path:     proxyPath,
 		Upstream: rec.server.URL,
 		ClientIP: func(r *http.Request) string { return r.Header.Get("X-Real-IP") },
+
+		AllowInsecureLoopback: true,
 	}
 	if apply != nil {
 		apply(&options)
@@ -171,7 +173,7 @@ func TestProxyRelaysOnlyAllowlistedHeaders(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":1}`))
 	})
 	proxy, err := NewProxy(ProxyOptions{
-		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
 		ClientIP: func(*http.Request) string { return "203.0.113.5" },
 	})
 	if err != nil {
@@ -439,7 +441,7 @@ func TestProxyNeverRelaysATruncatedAnswerAsASuccess(t *testing.T) {
 	for name, handler := range cases {
 		rec := newRecorder(t, handler)
 		proxy, err := NewProxy(ProxyOptions{
-			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
 			ClientIP: func(*http.Request) string { return "203.0.113.5" },
 		})
 		if err != nil {
@@ -490,7 +492,7 @@ func TestProxyAnswersUpstreamFailuresWithoutNamingAnyone(t *testing.T) {
 	} {
 		var reported []*ProxyError
 		proxy, err := NewProxy(ProxyOptions{
-			ProxyKey: testProxyKey, Path: proxyPath, Upstream: c.upstream, Timeout: 200 * time.Millisecond,
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: c.upstream, Timeout: 200 * time.Millisecond, AllowInsecureLoopback: true,
 			ClientIP: func(*http.Request) string { return "203.0.113.5" },
 			OnError:  func(_ *http.Request, failure *ProxyError) { reported = append(reported, failure) },
 		})
@@ -526,7 +528,7 @@ func TestProxyEndsQuietlyWhenTheVisitorDisconnects(t *testing.T) {
 	})
 	var reported int
 	proxy, err := NewProxy(ProxyOptions{
-		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
 		ClientIP: func(*http.Request) string { return "203.0.113.5" },
 		OnError:  func(*http.Request, *ProxyError) { reported++ },
 	})
@@ -559,7 +561,7 @@ func TestProxyAnswersARequestDeadlineAsATimeout(t *testing.T) {
 	})
 	var reported []*ProxyError
 	proxy, err := NewProxy(ProxyOptions{
-		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+		ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
 		ClientIP: func(*http.Request) string { return "203.0.113.5" },
 		OnError:  func(_ *http.Request, failure *ProxyError) { reported = append(reported, failure) },
 	})
@@ -596,7 +598,7 @@ func TestProxyAnswersAnUnrelayableUpstreamStatusAsBadGateway(t *testing.T) {
 			_, _ = connection.Write([]byte("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\n\r\n"))
 		})
 		proxy, err := NewProxy(ProxyOptions{
-			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL,
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
 			ClientIP: func(*http.Request) string { return "203.0.113.5" },
 			OnError:  func(*http.Request, *ProxyError) {},
 		})

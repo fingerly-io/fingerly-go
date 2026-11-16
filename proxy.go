@@ -108,8 +108,12 @@ type ProxyOptions struct {
 	Path string
 	// APIVersion selects the upstream ingest URL. Defaults to "v1".
 	APIVersion string
-	// Upstream overrides the API origin implied by the key.
+	// Upstream overrides the API origin. It must use https://.
 	Upstream string
+	// AllowInsecureLoopback accepts a plain http:// Upstream on 127.0.0.1,
+	// localhost or [::1], for a local test harness only. Any other http://
+	// host is refused whatever this is set to.
+	AllowInsecureLoopback bool
 	// MaxBodyBytes refuses larger request bodies with 413. Defaults to 1 MiB.
 	MaxBodyBytes int64
 	// Timeout bounds the upstream call. Defaults to 5 seconds.
@@ -223,7 +227,7 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	if upstream == "" {
 		upstream = defaultEndpoint
 	}
-	origin, err := normalizeOrigin(upstream)
+	origin, err := normalizeUpstream(upstream, options.AllowInsecureLoopback)
 	if err != nil {
 		return nil, err
 	}
@@ -469,10 +473,12 @@ func (p *Proxy) setUpstreamHeaders(
 	if p.usesProxyKey {
 		request.Header.Set("X-Fingerly-Proxy-Key", p.key)
 	}
+	// One channel only: the API refuses a proxied request that names both, and
+	// a non-empty origin is the browser channel, which is what the API picks
+	// for the same request sent directly.
 	if origin != "" {
 		request.Header.Set("X-Fingerly-Origin", origin)
-	}
-	if sdkPlatform != "" {
+	} else if sdkPlatform != "" {
 		request.Header.Set("X-Fingerly-SDK-Platform", sdkPlatform)
 	}
 	host := strings.TrimSpace(incoming.Host)
