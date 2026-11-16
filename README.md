@@ -1,10 +1,10 @@
 # fingerly-go
 
-Server-side event reads, webhook verification and a same-origin proxy for Go.
+Server-side event reads, webhook verification and a first-party proxy for Go.
 Go 1.22 or newer. No dependencies outside the standard library.
 
 ```sh
-go get github.com/fingerly-io/fingerly-go
+go get github.com/fingerly-io/fingerly-go@v0.3.0
 ```
 
 ```go
@@ -105,7 +105,20 @@ never retries on its own. `ErrEventNotFound` means the request id was never
 issued or the event is past retention.
 
 The archived `Document` arrives moments after the event itself, so check
-`HasDocument` rather than assuming it is there.
+`HasDocument` rather than assuming it is there, and call `event.ParseDocument()`
+to decode it into a typed `*EventDocument` (including `*Attestation` and
+`*EventRiskReport`). When a submission is unidentifiable (`!event.Identifiable()`,
+such as insufficient entropy, a genuine embedded WebView, or an unmatched
+high-risk Web payload), `event.VisitorID` is `""`; there are no `deferred_token`,
+`deferred_signals` or `supplements` fields in `v: 3`.
+
+Trigger and risk-report signals include the `v: 3` anti-spoofing and integrity
+constants `SignalAttestationFailed` (`"attestation_failed"`),
+`SignalDeviceInconsistent` (`"device_inconsistent"`),
+`SignalReportIncomplete` (`"report_incomplete"`),
+`SignalTampering` (`"tampering"`),
+`SignalCustomRootCA` (`"custom_root_ca"`) and
+`SignalSecondaryUserProfile` (`"secondary_user_profile"`).
 
 ## Verify a backend action
 
@@ -157,8 +170,17 @@ func verify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "verification unavailable", http.StatusBadGateway)
 		return
 	}
-	// Apply your policy: event.Tag, event.OccurredAt, event.Scored() and
-	// event.SuspectLevel.
+	// Apply your policy: event.Tag, event.OccurredAt, event.Scored(),
+	// event.Identifiable(), event.SuspectLevel, and triggers / ParseDocument().
+	for _, trigger := range event.Triggers {
+		if trigger.Signal == fingerly.SignalAttestationFailed {
+			http.Error(w, "attestation failed", http.StatusForbidden)
+			return
+		}
+	}
+	if doc, err := event.ParseDocument(); err == nil && doc != nil && doc.Attestation != nil {
+		_ = doc.Attestation.State // "attested", "not_attested", or "failed"
+	}
 	_, _ = w.Write([]byte(event.SuspectLevel))
 }
 
@@ -252,8 +274,8 @@ e.Any("/k7x2qm4a", echo.WrapHandler(proxy))      // echo
 app.All("/k7x2qm4a", adaptor.HTTPHandler(proxy)) // fiber
 ```
 
-Then point the browser SDK at the same path. It posts both of its calls there,
-exactly as given:
+Then point the client SDK at the same path. Browser and proxied native SDKs post
+a single `v: 3` identification envelope there, with nothing appended:
 
 ```ts
 const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/k7x2qm4a' })
@@ -266,21 +288,33 @@ wired up once at start-up, where an error is natural to handle.
 
 With `Path` set it answers only that path, matched exactly: a trailing or
 doubled slash, a dot segment, an encoded character, a different case or a path
-under it all get `404`. `Path` is
+under it (including retired `/supplement` paths) all get `404`. `Path` is
 optional: leave it empty when the route already sends only that path to the
 handler, and behind `http.StripPrefix`, which changes the path the handler
 sees. It must be an absolute path such as `/k7x2qm4a`, or `NewProxy` returns
-an error. Only `POST` is forwarded; any other method gets `405`.
+an error. Only `POST` (plus `OPTIONS` when `AllowedOrigins` is configured) is
+accepted; any other method gets `405`.
 
-Every forwarded request goes to one URL, `https://api.fingerly.io/api/v1/ingest`
-(`APIVersion` and `Upstream` change its version and origin). Event reads need a
-secret key and stay unreachable from a browser by construction.
+Every forwarded request goes with its raw body bytes untouched (never JSON
+re-encoded) to one URL, `https://api.fingerly.io/api/v1/ingest` (`APIVersion`
+and `Upstream` change its version and origin). Event reads need a secret key and
+stay unreachable from a browser by construction.
 
-The browser must present a public key from the same environment as the proxy
-key, or the request gets `401`. Bodies over 1 MiB get `413`. Only the content
-type, the visitor metadata Fingerly needs, and an `Idempotency-Key` are
-forwarded; customer cookies and authorization headers never are. The proxy
-reports itself upstream as `go/0.2.0`, which the dashboard shows per proxy.
+The caller must present a public key from the same environment as the proxy
+key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
+sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are
+stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact
+lowercase native or bridge platform (`ios`, `android`, `react-native`,
+`react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`,
+`flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`,
+`kotlin-multiplatform`). When both `Origin` and a validated
+`X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400`
+(`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`,
+`Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified
+proxy metadata (`X-Fingerly-Host` included), only `Content-Type`, `X-Api-Key`,
+`User-Agent`, `Idempotency-Key`, `Sec-Fetch-*` and `Sec-CH-UA-*` are forwarded.
+The proxy reports itself upstream as `go/0.3.0`, which the dashboard shows per
+proxy.
 
 One deadline, `Timeout` (5 seconds by default), covers the whole upstream
 exchange, body included, so a trickling answer cannot stretch it. When it
