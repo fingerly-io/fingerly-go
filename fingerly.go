@@ -31,6 +31,9 @@ const (
 type Client struct {
 	// Events reads stored events under this client's secret key.
 	Events *EventsService
+	// DeviceCheck spends an iOS event's held DeviceCheck token to read or
+	// write the device's two bits.
+	DeviceCheck *DeviceCheckService
 
 	secretKey  string
 	baseURL    string
@@ -107,6 +110,7 @@ func New(secretKey string, opts ...Option) *Client {
 
 	client := &Client{secretKey: secretKey}
 	client.Events = &EventsService{client: client}
+	client.DeviceCheck = &DeviceCheckService{client: client}
 
 	// Validate the key even when an endpoint is given, so a public, proxy or
 	// management key can never reach an API that would accept it.

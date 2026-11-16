@@ -85,6 +85,36 @@ func ExampleAPIError() {
 	fmt.Println(verdict)
 }
 
+// A once-per-device free trial on iOS spends two identifications, because
+// Apple treats each DeviceCheck token as single-use: read the bits on the
+// identification that asks for the trial, record the grant in your own data,
+// then write the bit on the device's next identification.
+func ExampleDeviceCheckService_Query() {
+	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+	ctx := context.Background()
+
+	// 1. The identification that asks for the trial.
+	bits, err := client.DeviceCheck.Query(ctx, "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4")
+	switch {
+	case errors.Is(err, fingerly.ErrDeviceCheckNotHeld), errors.Is(err, fingerly.ErrDeviceCheckSpent):
+		// No answer, not a verdict: decide on your own records alone.
+	case err != nil:
+		log.Fatal(err)
+	case bits.Found && bits.Bit0:
+		fmt.Println("this device already had a trial")
+		return
+	}
+	// 2. Grant the trial and record it in your own data, with the device
+	// not yet marked.
+
+	// 3. The next identification from that install marks the device.
+	if _, err := client.DeviceCheck.Write(ctx, "01a0a84b-f1c3-7d10-8a62-1c4e8b37d9f5",
+		fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)}); err != nil {
+		// Keep the device unmarked and write again on a later identification.
+		log.Print(err)
+	}
+}
+
 // Verify the raw bytes before decoding them: re-encoding changes the digest.
 func ExampleVerifyWebhook() {
 	http.HandleFunc("/webhooks/fingerly", func(w http.ResponseWriter, r *http.Request) {

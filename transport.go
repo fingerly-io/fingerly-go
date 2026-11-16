@@ -1,6 +1,7 @@
 package fingerly
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +39,12 @@ type errorEnvelope struct {
 // It never retries. The deadline covers the request and reading the body,
 // because a Go request context governs the whole exchange.
 func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) {
+	return c.send(ctx, http.MethodGet, path, nil)
+}
+
+// send performs one authenticated request with an optional JSON body and
+// returns the raw response body. It never retries.
+func (c *Client) send(ctx context.Context, method, path string, payload []byte) (json.RawMessage, error) {
 	if c.configErr != nil {
 		return nil, c.configErr
 	}
@@ -44,13 +52,22 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	var requestBody io.Reader
+	if payload != nil {
+		requestBody = bytes.NewReader(payload)
+	} else if method != http.MethodGet {
+		requestBody = http.NoBody
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("fingerly: build request: %w", err)
 	}
 	request.Header.Set("X-API-Key", c.secretKey)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", userAgent)
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
@@ -120,8 +137,32 @@ func (c *Client) apiError(response *http.Response) *APIError {
 		if json.Unmarshal([]byte(c.redact(string(envelope.Error.Details))), &details) == nil {
 			apiErr.Details = details
 		}
+		if apiErr.Code == codeAppleRejected {
+			apiErr.AppleStatus = appleStatus(envelope.Error.Details)
+		}
 	}
 	return apiErr
+}
+
+// appleStatus reads Apple's HTTP status from an apple_rejected answer's
+// details entry named apple_status, or 0 when there is none.
+func appleStatus(raw json.RawMessage) int {
+	var details []struct {
+		Field string `json:"field"`
+		Issue string `json:"issue"`
+	}
+	if json.Unmarshal(raw, &details) != nil {
+		return 0
+	}
+	for _, detail := range details {
+		if detail.Field != "apple_status" {
+			continue
+		}
+		if status, err := strconv.Atoi(strings.TrimSpace(detail.Issue)); err == nil && status > 0 && status < 1000 {
+			return status
+		}
+	}
+	return 0
 }
 
 // redact strips the secret key from anything an error may carry to logs.

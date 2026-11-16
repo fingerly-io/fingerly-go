@@ -201,6 +201,51 @@ func main() {
 }
 ```
 
+## DeviceCheck bits on iOS
+
+When DeviceCheck is turned on for the project's Apple key, Fingerly holds the
+Apple DeviceCheck token of an iOS identification for one hour.
+`client.DeviceCheck` spends it, once, to read or to write the two bits Apple
+keeps for the device. The bits survive a reinstall and mean what you decide.
+
+```go
+bits, err := client.DeviceCheck.Query(ctx, requestID)
+// bits.Found, bits.Bit0, bits.Bit1, bits.LastUpdate ("YYYY-MM")
+
+_, err = client.DeviceCheck.Write(ctx, requestID, fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)})
+```
+
+Apple treats a DeviceCheck token as single-use, so a read and a write each
+need their own identification. A once-per-device free trial takes two:
+
+1. On the identification that asks for the trial, call `Query`. If the bits
+   say the device already had one, refuse it.
+2. Otherwise grant the trial and record the grant in your own data, with the
+   device not yet marked.
+3. On the next identification from that install (the app can identify again
+   right after the grant), call `Write` with the bit, then mark the record.
+   Until the write lands, your own record is what stops a second trial.
+
+Each answer has a sentinel for `errors.Is`; the concrete error is an
+`*APIError`:
+
+| Sentinel | Status and code | What to do |
+|---|---|---|
+| `ErrDeviceCheckNotHeld` | `404 device_check_not_held` | No token for that event. Decide without the bits. |
+| `ErrDeviceCheckSpent` | `409 device_check_spent` | Already used, or not the request it was first used for. Use another identification. |
+| `ErrDeviceCheckBusy` | `409 device_check_busy` | Another call is using it. Retry in a moment. |
+| `ErrCredentialUnavailable` | `409 credential_unavailable` | Fix the Apple key, then retry within the hour. |
+| `ErrBitsRequired` | `422 bits_required` | Name `Bit0`, `Bit1` or both. Also returned, without a request, by a `Write` naming neither. |
+| `ErrAppleRejected` | `422 apple_rejected` | Apple rejected the token; `APIError.AppleStatus` holds Apple's HTTP status. |
+| `ErrDeviceCheckUnavailable` | `503 device_check_unavailable` | The token is kept. Retry the same call within the hour. |
+
+A retry must be the same request: while a token is kept after an answer that
+was not definite, the API accepts only the operation and bits it was first
+used for, and answers anything else with `device_check_spent`. The SDK
+retries a `503` or a call that got no complete answer up to twice, with the
+identical request, and nothing else. When you retry later yourself, repeat
+the same call with the same bits.
+
 ## Webhooks
 
 ```go
@@ -399,7 +444,8 @@ secrets in fixtures.
 `fingerly.go` holds the `Client` and its options. `transport.go` performs
 authenticated requests and maps failures to `*APIError`. `events.go` owns the
 event reads and the list filters; `models.go` owns the types they decode into.
+`device_check.go` reads and writes an event's DeviceCheck bits.
 `webhooks.go` verifies signatures. `proxy.go` is the same-origin handler.
 `config.go` validates every caller-supplied option: keys, origins, API versions
 and durations, all before any network access. `errors.go` holds the error type
-and its sentinel.
+and its sentinels.

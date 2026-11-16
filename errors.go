@@ -54,6 +54,10 @@ type APIError struct {
 	// its Retry-After header, or nil when it sent none. The SDK never retries
 	// a read itself.
 	RetryAfter *int
+	// AppleStatus is Apple's HTTP status on an apple_rejected answer from a
+	// DeviceCheck call, read from the details entry named apple_status, and 0
+	// on any other error.
+	AppleStatus int
 }
 
 // Error implements error. It reports the status only, never the body.
@@ -66,19 +70,57 @@ func (e *APIError) Error() string {
 
 // Is reports whether this error matches a sentinel, so a caller can write
 // errors.Is(err, fingerly.ErrEventNotFound) or
-// errors.Is(err, fingerly.ErrEventPending) without unwrapping the status.
+// errors.Is(err, fingerly.ErrDeviceCheckSpent) without unwrapping the status.
 func (e *APIError) Is(target error) bool {
-	if e.Status != http.StatusNotFound {
-		return false
-	}
-	switch target {
-	case ErrEventNotFound:
-		return e.Code == "event_not_found"
-	case ErrEventPending:
-		return e.Code == "event_pending"
-	}
-	return false
+	want, ok := sentinelAnswers[target]
+	return ok && e.Status == want.status && e.Code == want.code
 }
+
+// sentinelAnswers maps each sentinel to the status and code it matches.
+var sentinelAnswers = map[error]struct {
+	status int
+	code   string
+}{
+	ErrEventNotFound:          {http.StatusNotFound, "event_not_found"},
+	ErrEventPending:           {http.StatusNotFound, "event_pending"},
+	ErrDeviceCheckNotHeld:     {http.StatusNotFound, "device_check_not_held"},
+	ErrDeviceCheckSpent:       {http.StatusConflict, "device_check_spent"},
+	ErrDeviceCheckBusy:        {http.StatusConflict, "device_check_busy"},
+	ErrCredentialUnavailable:  {http.StatusConflict, "credential_unavailable"},
+	ErrBitsRequired:           {http.StatusUnprocessableEntity, "bits_required"},
+	ErrAppleRejected:          {http.StatusUnprocessableEntity, codeAppleRejected},
+	ErrDeviceCheckUnavailable: {http.StatusServiceUnavailable, "device_check_unavailable"},
+}
+
+const codeAppleRejected = "apple_rejected"
+
+// The DeviceCheck answers, one sentinel per code. Compare with errors.Is; the
+// concrete error is always an *APIError, except ErrBitsRequired, which a
+// write naming neither bit returns before anything is sent.
+var (
+	// ErrDeviceCheckNotHeld (404 device_check_not_held): no token is held for
+	// that event. Not a verdict: decide without the bits.
+	ErrDeviceCheckNotHeld = errors.New("fingerly: no device check token is held for that event")
+	// ErrDeviceCheckSpent (409 device_check_spent): the token was already
+	// used, or this call is not the request the token was first used for.
+	ErrDeviceCheckSpent = errors.New("fingerly: the event's device check token was already used")
+	// ErrDeviceCheckBusy (409 device_check_busy): another call is using the
+	// token right now.
+	ErrDeviceCheckBusy = errors.New("fingerly: the event's device check token is being used")
+	// ErrCredentialUnavailable (409 credential_unavailable): the project's
+	// Apple key is missing, refused by Apple, or has DeviceCheck off. The
+	// token is kept.
+	ErrCredentialUnavailable = errors.New("fingerly: the project's Apple credential is unavailable")
+	// ErrBitsRequired (422 bits_required): a write named neither bit.
+	ErrBitsRequired = errors.New("fingerly: name bit0, bit1 or both")
+	// ErrAppleRejected (422 apple_rejected): Apple rejected the token, which
+	// is now used. APIError.AppleStatus holds Apple's HTTP status.
+	ErrAppleRejected = errors.New("fingerly: Apple rejected the device check request")
+	// ErrDeviceCheckUnavailable (503 device_check_unavailable): Apple or
+	// Fingerly's storage could not answer, after the SDK's own retries. The
+	// token is kept; retry the same call within the hour.
+	ErrDeviceCheckUnavailable = errors.New("fingerly: device check is unavailable just now")
+)
 
 // ErrTimeout matches a read whose deadline passed, whether the caller's or
 // WithTimeout's. Compare with errors.Is.

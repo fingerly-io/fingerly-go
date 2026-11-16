@@ -2,6 +2,11 @@
 
 ## 0.3.0
 
+- Added `Client.DeviceCheck` with `Query` and `Write`, which spend an iOS
+  event's held DeviceCheck token to read or write the device's two bits,
+  `DeviceCheckBits`, `DeviceCheckWrite`, `DeviceCheckWriteResult`, `Bool`,
+  `APIError.AppleStatus`, and a sentinel per DeviceCheck error code. A `503`
+  or a transport failure is retried with the identical request.
 - Refreshed the vendored v3 OpenAPI and contract fixtures, removing retired
   deferred supplement schemas and routes, and added `Event.Reason`,
   `Event.Identifiable()`, `Event.ParseDocument()`, `EventDocument`,
