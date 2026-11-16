@@ -115,6 +115,28 @@ func ExampleDeviceCheckService_Query() {
 	}
 }
 
+// Verify checks the event and consumes it last, so a replayed request id
+// fails with already_consumed. The score policy stays with the caller.
+func ExampleEventsService_Verify() {
+	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+
+	tag := "checkout"
+	result, err := client.Events.Verify(context.Background(), "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4",
+		&fingerly.VerifyOptions{Tag: &tag})
+	switch {
+	case errors.Is(err, fingerly.ErrEventPending):
+		// Not a verdict: ask the caller to try again shortly.
+	case err != nil:
+		log.Fatal(err)
+	case !result.OK:
+		fmt.Println("refused:", result.Reason)
+	case result.Event.SuspectLevel == "high":
+		fmt.Println("refused: high risk")
+	default:
+		fmt.Println("allowed")
+	}
+}
+
 // Verify the raw bytes before decoding them: re-encoding changes the digest.
 func ExampleVerifyWebhook() {
 	http.HandleFunc("/webhooks/fingerly", func(w http.ResponseWriter, r *http.Request) {

@@ -28,7 +28,7 @@ func (s *EventsService) Get(ctx context.Context, requestID string) (*Event, erro
 	if !validRequestID(requestID) {
 		return nil, ErrInvalidRequestID
 	}
-	body, err := s.client.get(ctx, "/events/"+url.PathEscape(requestID))
+	body, err := s.client.get(ctx, eventPath(requestID))
 	if err != nil {
 		return nil, err
 	}

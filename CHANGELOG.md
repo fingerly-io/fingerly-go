@@ -2,6 +2,12 @@
 
 ## 0.3.0
 
+- Added `Events.Verify(ctx, requestID, *VerifyOptions)`, which reads an event
+  and checks it exists, is recent (`MaxAgeSeconds`, 300 by default), carries
+  the expected `Tag`, is identifiable and scored, then consumes it once
+  (`SkipConsume` to skip), reporting a `VerifyReason` in a `VerifyResult`, and
+  `Events.Consume(ctx, requestID)` with a typed `EventAlreadyConsumedError`
+  for `event_already_consumed`, matching `ErrEventAlreadyConsumed`.
 - Added `Client.DeviceCheck` with `Query` and `Write`, which spend an iOS
   event's held DeviceCheck token to read or write the device's two bits,
   `DeviceCheckBits`, `DeviceCheckWrite`, `DeviceCheckWriteResult`, `Bool`,

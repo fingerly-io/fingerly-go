@@ -133,13 +133,38 @@ proof) and `Downgrade` (the report named an install an attested device owns).
 
 ## Verify a backend action
 
-Read the event with a server-only key. Check that its tag matches your action,
-that it is recent, that its environment is correct, and that it was scored.
-Apply your own policy to the server's verdict. Do not authorize an action using
-scores or visitor identifiers supplied by the browser. Tags correlate events;
-they do not replace your application's authentication or replay protection.
-Never put a personal identifier (user ID, email, install ID, advertising ID) in
-a tag: the server keeps tag values in long-lived rollups.
+Verify the event with a server-only key, then apply your own policy to the
+server's verdict. Do not authorize an action using scores or visitor
+identifiers supplied by the browser. Tags correlate events; they do not
+replace your application's authentication or replay protection. Never put a
+personal identifier (user ID, email, install ID, advertising ID) in a tag: the
+server keeps tag values in long-lived rollups.
+
+`client.Events.Verify` reads the event and runs these checks in order,
+stopping at the first that fails, whose `VerifyReason` it reports:
+
+1. `VerifyNotFound` (`"not_found"`): the event does not exist.
+   `VerifyResult.Event` is nil only for this reason.
+2. `VerifyTooOld` (`"too_old"`): it occurred more than `MaxAgeSeconds` ago
+   (300 by default, `DefaultVerifyMaxAge`), or its `occurred_at` is missing
+   or unreadable.
+3. `VerifyTagMismatch` (`"tag_mismatch"`): `Tag` was given and the event's tag
+   is not exactly that. A nil `Tag` skips this check; an empty one is refused.
+4. `VerifyUnidentifiable` (`"unidentifiable"`): the event has no `VisitorID`.
+5. `VerifyUnscored` (`"unscored"`): the event has no suspect score.
+6. `VerifyAlreadyConsumed` (`"already_consumed"`): every check above passed,
+   but the event was already consumed.
+
+Only when every other check passes does `Verify` consume the event, last, so
+one event backs one decision and a replayed request id fails. Set
+`SkipConsume: true` to check without consuming. When everything passes,
+`OK` is true and `Reason` is `""`. A negative `MaxAgeSeconds` or an empty
+`Tag` returns `ErrInvalidVerifyOptions` before any request.
+
+A failed check is a result, not an error. Every other failure is returned
+unchanged as the error, including `ErrEventPending`, which is not a verdict.
+`Verify` never looks at the score's value, the level or the triggers: that
+policy stays with you.
 
 `Event.ProjectID` is the Fingerly project the event belongs to, on both
 `Events.Get` and every row of `Events.List`. It is empty when an older server
@@ -160,9 +185,11 @@ import (
 
 var client = fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
 
-// POST /verify/{request_id}
-func verify(w http.ResponseWriter, r *http.Request) {
-	event, err := client.Events.Get(r.Context(), r.PathValue("request_id"))
+// POST /checkout/{request_id}
+func checkout(w http.ResponseWriter, r *http.Request) {
+	tag := "checkout"
+	result, err := client.Events.Verify(r.Context(), r.PathValue("request_id"),
+		&fingerly.VerifyOptions{Tag: &tag})
 	var apiErr *fingerly.APIError
 	switch {
 	case errors.Is(err, fingerly.ErrEventPending) && errors.As(err, &apiErr):
@@ -174,15 +201,23 @@ func verify(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", strconv.Itoa(wait))
 		http.Error(w, "verification pending", http.StatusServiceUnavailable)
 		return
-	case errors.Is(err, fingerly.ErrEventNotFound):
-		http.Error(w, "unknown request", http.StatusForbidden)
-		return
 	case err != nil:
 		http.Error(w, "verification unavailable", http.StatusBadGateway)
 		return
+	case !result.OK:
+		// not_found, too_old, tag_mismatch, unidentifiable, unscored or
+		// already_consumed.
+		http.Error(w, "verification failed: "+string(result.Reason), http.StatusForbidden)
+		return
 	}
-	// Apply your policy: event.Tag, event.OccurredAt, event.Scored(),
-	// event.Identifiable(), event.SuspectLevel, and triggers / ParseDocument().
+	// The event is recent, tagged, identified, scored and now consumed. The
+	// score policy is yours: result.Event.SuspectLevel, Score(), triggers and
+	// ParseDocument().
+	event := result.Event
+	if event.SuspectLevel == "high" {
+		http.Error(w, "checkout refused", http.StatusForbidden)
+		return
+	}
 	for _, trigger := range event.Triggers {
 		if trigger.Signal == fingerly.SignalAttestationFailed {
 			http.Error(w, "attestation failed", http.StatusForbidden)
@@ -192,12 +227,28 @@ func verify(w http.ResponseWriter, r *http.Request) {
 	if doc, err := event.ParseDocument(); err == nil && doc != nil && doc.Attestation != nil {
 		_ = doc.Attestation.State // "attested", "not_attested", or "failed"
 	}
-	_, _ = w.Write([]byte(event.SuspectLevel))
+	_, _ = w.Write([]byte("ok"))
 }
 
 func main() {
-	http.HandleFunc("POST /verify/{request_id}", verify)
+	http.HandleFunc("POST /checkout/{request_id}", checkout)
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+To consume an event on its own, call `client.Events.Consume`. It is a POST
+with no body and is never retried. The first call returns a `*ConsumeResult`
+with `ConsumedAt` and `First`; any later call returns an
+`*EventAlreadyConsumedError`, which matches `ErrEventAlreadyConsumed` with
+`errors.Is`, reaches its `*APIError` (status `409`, code
+`event_already_consumed`) with `errors.As`, and carries `ConsumedAt` from the
+first call, or `""` when the answer did not say.
+
+```go
+_, err := client.Events.Consume(ctx, requestID)
+var consumed *fingerly.EventAlreadyConsumedError
+if errors.As(err, &consumed) {
+	// Already used at consumed.ConsumedAt: refuse the replay.
 }
 ```
 
@@ -444,6 +495,7 @@ secrets in fixtures.
 `fingerly.go` holds the `Client` and its options. `transport.go` performs
 authenticated requests and maps failures to `*APIError`. `events.go` owns the
 event reads and the list filters; `models.go` owns the types they decode into.
+`verify.go` verifies and consumes an event for a backend decision.
 `device_check.go` reads and writes an event's DeviceCheck bits.
 `webhooks.go` verifies signatures. `proxy.go` is the same-origin handler.
 `config.go` validates every caller-supplied option: keys, origins, API versions

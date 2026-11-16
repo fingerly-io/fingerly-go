@@ -28,10 +28,25 @@ var userAgent = "fingerly-go/" + Version
 // errorEnvelope is the API's error body. Every field is treated as untrusted.
 type errorEnvelope struct {
 	Error struct {
-		Code    string          `json:"code"`
-		Details json.RawMessage `json:"details"`
+		Code       string          `json:"code"`
+		Details    json.RawMessage `json:"details"`
+		ConsumedAt json.RawMessage `json:"consumed_at"`
 	} `json:"error"`
-	RequestID string `json:"request_id"`
+	// Code and ConsumedAt at the top level are read only for an
+	// event_already_consumed answer, whose body may carry them there. They
+	// stay raw so an unexpected shape never spoils the rest of the envelope.
+	Code       json.RawMessage `json:"code"`
+	ConsumedAt json.RawMessage `json:"consumed_at"`
+	RequestID  string          `json:"request_id"`
+}
+
+// rawString decodes a raw JSON value as a string, or "" when it is not one.
+func rawString(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return value
 }
 
 // get performs one authenticated GET and returns the raw response body.
@@ -127,6 +142,9 @@ func (c *Client) apiError(response *http.Response) *APIError {
 		return apiErr
 	}
 	apiErr.Code = c.redact(envelope.Error.Code)
+	if apiErr.Code == "" && rawString(envelope.Code) == codeEventAlreadyConsumed {
+		apiErr.Code = codeEventAlreadyConsumed
+	}
 	if envelope.RequestID != "" {
 		apiErr.RequestID = c.redact(envelope.RequestID)
 	}
@@ -141,7 +159,36 @@ func (c *Client) apiError(response *http.Response) *APIError {
 			apiErr.AppleStatus = appleStatus(envelope.Error.Details)
 		}
 	}
+	if apiErr.Code == codeEventAlreadyConsumed {
+		apiErr.consumedAt = c.redact(consumedAt(envelope))
+	}
 	return apiErr
+}
+
+// consumedAt reads when an event was first consumed from an
+// event_already_consumed answer: a top-level consumed_at, error.consumed_at,
+// or an error.details entry named consumed_at, whose issue is the time. It is
+// "" when none is present.
+func consumedAt(envelope errorEnvelope) string {
+	if at := rawString(envelope.ConsumedAt); at != "" {
+		return at
+	}
+	if at := rawString(envelope.Error.ConsumedAt); at != "" {
+		return at
+	}
+	var details []struct {
+		Field string `json:"field"`
+		Issue string `json:"issue"`
+	}
+	if json.Unmarshal(envelope.Error.Details, &details) != nil {
+		return ""
+	}
+	for _, detail := range details {
+		if detail.Field == "consumed_at" {
+			return strings.TrimSpace(detail.Issue)
+		}
+	}
+	return ""
 }
 
 // appleStatus reads Apple's HTTP status from an apple_rejected answer's

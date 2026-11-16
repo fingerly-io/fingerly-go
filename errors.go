@@ -58,6 +58,10 @@ type APIError struct {
 	// DeviceCheck call, read from the details entry named apple_status, and 0
 	// on any other error.
 	AppleStatus int
+
+	// consumedAt is when the event was first consumed, on an
+	// event_already_consumed answer. EventAlreadyConsumedError surfaces it.
+	consumedAt string
 }
 
 // Error implements error. It reports the status only, never the body.
@@ -90,9 +94,43 @@ var sentinelAnswers = map[error]struct {
 	ErrBitsRequired:           {http.StatusUnprocessableEntity, "bits_required"},
 	ErrAppleRejected:          {http.StatusUnprocessableEntity, codeAppleRejected},
 	ErrDeviceCheckUnavailable: {http.StatusServiceUnavailable, "device_check_unavailable"},
+	ErrEventAlreadyConsumed:   {http.StatusConflict, codeEventAlreadyConsumed},
 }
 
-const codeAppleRejected = "apple_rejected"
+const (
+	codeAppleRejected        = "apple_rejected"
+	codeEventAlreadyConsumed = "event_already_consumed"
+)
+
+// ErrEventAlreadyConsumed matches a consume of an event that was already
+// consumed (409 event_already_consumed). Compare with errors.Is; the concrete
+// error is an *EventAlreadyConsumedError, which also matches *APIError with
+// errors.As.
+var ErrEventAlreadyConsumed = errors.New("fingerly: event already consumed")
+
+// EventAlreadyConsumedError is returned by EventsService.Consume for an event
+// that was already consumed (409 event_already_consumed). It carries
+// everything the *APIError does, which errors.As also reaches, plus when the
+// event was first consumed.
+//
+//	var consumed *fingerly.EventAlreadyConsumedError
+//	if errors.As(err, &consumed) {
+//		// consumed.ConsumedAt, consumed.Status (409), consumed.Code
+//	}
+type EventAlreadyConsumedError struct {
+	*APIError
+	// ConsumedAt is when the event was first consumed, RFC 3339 as the API
+	// sent it, or "" when the answer did not say.
+	ConsumedAt string
+}
+
+// Unwrap returns the underlying *APIError.
+func (e *EventAlreadyConsumedError) Unwrap() error { return e.APIError }
+
+// ErrInvalidVerifyOptions is returned by EventsService.Verify, before any
+// request is made, for a negative MaxAgeSeconds or an empty Tag. Compare with
+// errors.Is.
+var ErrInvalidVerifyOptions = errors.New("fingerly: invalid verify options")
 
 // The DeviceCheck answers, one sentinel per code. Compare with errors.Is; the
 // concrete error is always an *APIError, except ErrBitsRequired, which a
