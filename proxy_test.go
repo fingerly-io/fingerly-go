@@ -89,22 +89,21 @@ func TestNewProxyRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
-func TestProxyForwardsBothCallsToTheOneIngestURL(t *testing.T) {
-	// The identification and the deferred report share the path; the API
-	// tells them apart by the body.
-	for _, body := range []string{`{"signals":{}}`, `{"token":"t"}`} {
-		for _, path := range []string{proxyPath} {
-			proxy, rec := newProxy(t, nil)
-			response := call(proxy, http.MethodPost, path, browserHeaders(), body)
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("%s %s: status %d", path, body, response.StatusCode)
-			}
-			if got := rec.requests[0].URL.Path; got != ingestPath {
-				t.Errorf("%s %s: forwarded to %q, want %q", path, body, got, ingestPath)
-			}
-			if got := rec.body(0); got != body {
-				t.Errorf("%s: body is %q", path, got)
-			}
+func TestProxyForwardsRawV3PayloadVerbatimToIngestURL(t *testing.T) {
+	for _, body := range []string{
+		`{"v":3,"signals":{"latency":142.50,"sci":1e-05}}`,
+		`{"v":3,"sdk":{"platform":"web","version":"0.3.0"},"consent":"granted","signals":{}}`,
+	} {
+		proxy, rec := newProxy(t, nil)
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), body)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", body, response.StatusCode)
+		}
+		if got := rec.requests[0].URL.Path; got != ingestPath {
+			t.Errorf("%s: forwarded to %q, want %q", body, got, ingestPath)
+		}
+		if got := rec.body(0); got != body {
+			t.Errorf("body mutated: got %q, want %q", got, body)
 		}
 	}
 }
@@ -224,6 +223,8 @@ func TestProxyRefusesEveryOtherPath(t *testing.T) {
 		"/",
 		"/other",
 		"/k7x2qm4a/admin",
+		"/k7x2qm4a/supplement",
+		"/k7x2qm4a/events/req_1/supplement",
 		"/k7x2qm4a/api/v1/identify",
 		"/k7x2qm4ab",
 		"/api/v1/ingest",
@@ -402,7 +403,10 @@ func TestProxyForwardsTheSecretKeyWithoutAPublicKey(t *testing.T) {
 		o.ProxyKey, o.SecretKey = "", testSecretKey
 	})
 	// No public key: the deprecated secret-key mode authenticates on its own.
-	response := call(proxy, http.MethodPost, proxyPath, map[string]string{"X-Real-IP": "203.0.113.5"}, "{}")
+	response := call(proxy, http.MethodPost, proxyPath, map[string]string{
+		"X-Real-IP": "203.0.113.5",
+		"Origin":    "https://shop.test",
+	}, "{}")
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", response.StatusCode)
 	}
@@ -602,6 +606,175 @@ func TestProxyAnswersAnUnrelayableUpstreamStatusAsBadGateway(t *testing.T) {
 		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
 		if response.StatusCode != http.StatusBadGateway {
 			t.Errorf("%s: status %d, want 502", status, response.StatusCode)
+		}
+	}
+}
+
+func TestProxySanitizeAndRestoreOriginGateAndMetadata(t *testing.T) {
+	proxy, rec := newProxy(t, func(o *ProxyOptions) {
+		o.AllowedOrigins = []string{"https://app.shop.test"}
+	})
+
+	// 1. Originless browser POST -> 400 missing_origin, never synthesizes X-Fingerly-Origin.
+	noOrigin := call(proxy, http.MethodPost, proxyPath, map[string]string{
+		"X-API-Key": testPublicKey,
+		"X-Real-IP": "203.0.113.5",
+		"Host":      "shop.test",
+		"Referer":   "https://shop.test/checkout",
+	}, `{}`)
+	if noOrigin.StatusCode != http.StatusBadRequest {
+		t.Fatalf("originless POST status = %d, want 400", noOrigin.StatusCode)
+	}
+	if got := noOrigin.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	noOriginBody, _ := io.ReadAll(noOrigin.Body)
+	if !strings.Contains(string(noOriginBody), `"missing_origin"`) {
+		t.Errorf("expected missing_origin error body, got %q", noOriginBody)
+	}
+
+	// 2. Spoofed X-Fingerly-* headers and invalid X-Fingerly-SDK-Platform values -> 400.
+	for _, invalid := range []string{
+		"",
+		"web",
+		"iOS",
+		"ANDROID",
+		" ios",
+		"ios ",
+		"ios, android",
+		"unknown",
+	} {
+		resp := call(proxy, http.MethodPost, proxyPath, map[string]string{
+			"X-API-Key":               testPublicKey,
+			"X-Real-IP":               "203.0.113.5",
+			"X-Fingerly-SDK-Platform": invalid,
+			"X-Fingerly-Origin":       "https://forged.test",
+			"X-Fingerly-Proxy-Key":    "fly_px_development_forged",
+			"X-Fingerly-Client-IP":    "1.2.3.4",
+		}, `{}`)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("invalid platform %q: status %d, want 400", invalid, resp.StatusCode)
+		}
+	}
+
+	// Multiple X-Fingerly-SDK-Platform header lines must also be discarded -> 400.
+	multiReq := httptest.NewRequest(http.MethodPost, proxyPath, strings.NewReader(`{}`))
+	multiReq.Header.Set("X-API-Key", testPublicKey)
+	multiReq.Header.Set("X-Real-IP", "203.0.113.5")
+	multiReq.Header.Add("X-Fingerly-SDK-Platform", "ios")
+	multiReq.Header.Add("X-Fingerly-SDK-Platform", "android")
+	multiRes := httptest.NewRecorder()
+	proxy.ServeHTTP(multiRes, multiReq)
+	if multiRes.Code != http.StatusBadRequest {
+		t.Errorf("duplicate X-Fingerly-SDK-Platform headers: status %d, want 400", multiRes.Code)
+	}
+	if len(rec.requests) != 0 {
+		t.Fatalf("refused requests reached upstream: %d", len(rec.requests))
+	}
+
+	// 3. Valid native/bridge platforms without Origin forward with X-Fingerly-SDK-Platform and NO X-Fingerly-Origin.
+	validPlatforms := []string{
+		"ios",
+		"android",
+		"react-native",
+		"react-native-ios",
+		"react-native-android",
+		"flutter",
+		"flutter-ios",
+		"flutter-android",
+		"lynx-ios",
+		"lynx-android",
+		"capacitor",
+		"kotlin-multiplatform",
+	}
+	rawPayload := `{"v":3,"signals":{"latency":142.50,"sci":1e-05}}`
+	for _, platform := range validPlatforms {
+		resp := call(proxy, http.MethodPost, proxyPath, map[string]string{
+			"X-API-Key":                   testPublicKey,
+			"X-Real-IP":                   "203.0.113.5",
+			"x-fingerly-sdk-platform":     platform,
+			"Idempotency-Key":             "idem-go-native-0001",
+			"X-Fingerly-Origin":           "https://forged.test",
+			"X-Fingerly-Proxy-Key":        "fly_px_development_forged",
+			"X-Fingerly-Client-IP":        "1.2.3.4",
+			"X-Fingerly-Edge-TLS-Version": "TLSv1.3",
+			"Cookie":                      "sid=secret",
+			"Authorization":               "Bearer secret",
+		}, rawPayload)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("platform %s: status %d, want 200", platform, resp.StatusCode)
+		}
+		fwd := rec.requests[len(rec.requests)-1]
+		if got := fwd.Header.Get("X-Fingerly-SDK-Platform"); got != platform {
+			t.Errorf("X-Fingerly-SDK-Platform = %q, want %q", got, platform)
+		}
+		if vals := fwd.Header.Values("X-Fingerly-Origin"); len(vals) != 0 {
+			t.Errorf("native request carried X-Fingerly-Origin: %v", vals)
+		}
+		if got := fwd.Header.Get("X-Fingerly-Proxy-Key"); got != testProxyKey {
+			t.Errorf("X-Fingerly-Proxy-Key = %q, want %q", got, testProxyKey)
+		}
+		if got := fwd.Header.Get("X-Fingerly-Client-IP"); got != "203.0.113.5" {
+			t.Errorf("X-Fingerly-Client-IP = %q, want 203.0.113.5", got)
+		}
+		if got := fwd.Header.Get("X-Fingerly-Edge-TLS-Version"); got != "" {
+			t.Errorf("spoofed X-Fingerly-Edge-TLS-Version forwarded: %q", got)
+		}
+		if got := rec.body(len(rec.requests) - 1); got != rawPayload {
+			t.Errorf("raw body mutated: got %q, want %q", got, rawPayload)
+		}
+	}
+
+	// 4. Cross-origin CORS preflight and Sec-Fetch-* / Sec-CH-UA-* forwarding.
+	preflight := call(proxy, http.MethodOptions, proxyPath, map[string]string{
+		"Origin": "https://app.shop.test",
+	}, "")
+	if preflight.StatusCode != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d, want 204", preflight.StatusCode)
+	}
+	if !strings.Contains(preflight.Header.Get("Access-Control-Allow-Headers"), "x-fingerly-sdk-platform") {
+		t.Errorf("Access-Control-Allow-Headers = %q", preflight.Header.Get("Access-Control-Allow-Headers"))
+	}
+	if !strings.Contains(preflight.Header.Get("Access-Control-Expose-Headers"), "retry-after") {
+		t.Errorf("Access-Control-Expose-Headers = %q", preflight.Header.Get("Access-Control-Expose-Headers"))
+	}
+
+	webResp := call(proxy, http.MethodPost, proxyPath, map[string]string{
+		"X-API-Key":               testPublicKey,
+		"X-Real-IP":               "203.0.113.5",
+		"Origin":                  "https://app.shop.test",
+		"Idempotency-Key":         "idem-go-web-00001",
+		"Sec-Fetch-Site":          "same-site",
+		"Sec-Fetch-Mode":          "cors",
+		"Sec-Fetch-Dest":          "empty",
+		"Sec-CH-UA":               `"Chromium";v="130"`,
+		"Sec-CH-UA-Mobile":        "?0",
+		"Sec-CH-UA-Platform":      `"macOS"`,
+		"X-Fingerly-SDK-Platform": "web",
+	}, rawPayload)
+	if webResp.StatusCode != http.StatusOK {
+		t.Fatalf("web POST status = %d, want 200", webResp.StatusCode)
+	}
+	if got := webResp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.shop.test" {
+		t.Errorf("Access-Control-Allow-Origin = %q", got)
+	}
+	fwd := rec.requests[len(rec.requests)-1]
+	if got := fwd.Header.Get("X-Fingerly-Origin"); got != "https://app.shop.test" {
+		t.Errorf("X-Fingerly-Origin = %q", got)
+	}
+	if vals := fwd.Header.Values("X-Fingerly-SDK-Platform"); len(vals) != 0 {
+		t.Errorf("invalid X-Fingerly-SDK-Platform forwarded: %v", vals)
+	}
+	for name, want := range map[string]string{
+		"Sec-Fetch-Site":     "same-site",
+		"Sec-Fetch-Mode":     "cors",
+		"Sec-Fetch-Dest":     "empty",
+		"Sec-CH-UA":          `"Chromium";v="130"`,
+		"Sec-CH-UA-Mobile":   "?0",
+		"Sec-CH-UA-Platform": `"macOS"`,
+	} {
+		if got := fwd.Header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
 }
