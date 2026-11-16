@@ -245,8 +245,11 @@ func TestV3OpenAPIAndModels(t *testing.T) {
 
 	v3Signals := []string{
 		SignalAttestationFailed,
+		SignalAttestationDowngrade,
 		SignalDeviceInconsistent,
 		SignalReportIncomplete,
+		SignalProbeErrors,
+		SignalFetchMetadataMissing,
 		SignalTampering,
 		SignalCustomRootCA,
 		SignalSecondaryUserProfile,
@@ -306,6 +309,49 @@ func TestV3OpenAPIAndModels(t *testing.T) {
 	}
 	if doc.Attestation == nil || doc.Attestation.Status != AttestationStatusVerified || doc.Attestation.DeviceCheck != "held" {
 		t.Errorf("unexpected attestation: %+v", doc.Attestation)
+	}
+}
+
+func TestV3AntiSpoofingSignalsAndAttestationDiagnostics(t *testing.T) {
+	for constant, wire := range map[string]string{
+		SignalAttestationDowngrade: "attestation_downgrade",
+		SignalProbeErrors:          "probe_errors",
+		SignalFetchMetadataMissing: "fetch_metadata_missing",
+	} {
+		if constant != wire {
+			t.Errorf("signal constant = %q, want %q", constant, wire)
+		}
+	}
+
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(map[string]any{
+		"visitor_id":   "",
+		"has_document": true,
+		"document": map[string]any{
+			"schema":      1,
+			"request_id":  testRequestID,
+			"occurred_at": "2026-09-17T12:00:00Z",
+			"sdk":         map[string]any{"platform": "ios", "version": "0.3.0"},
+			"attestation": map[string]any{
+				"state":          AttestationStateNotAttested,
+				"platform":       "ios",
+				"status":         AttestationStatusAbsent,
+				"attest_skipped": "timeout",
+				"downgrade":      true,
+			},
+		},
+	})))
+
+	event, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	doc, err := event.ParseDocument()
+	if err != nil || doc == nil || doc.Attestation == nil {
+		t.Fatalf("ParseDocument: doc=%v err=%v", doc, err)
+	}
+	if doc.Attestation.AttestSkipped != "timeout" || !doc.Attestation.Downgrade {
+		t.Errorf("attest_skipped=%q downgrade=%v, want timeout and true",
+			doc.Attestation.AttestSkipped, doc.Attestation.Downgrade)
 	}
 }
 

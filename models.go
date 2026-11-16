@@ -31,6 +31,7 @@ const (
 	SignalDeveloperTools        = "developer_tools"
 	SignalRemoteControl         = "remote_control"
 	SignalBot                   = "bot"
+	SignalFetchMetadataMissing  = "fetch_metadata_missing"
 	SignalHighActivity          = "high_activity"
 	SignalIncognitoMode         = "incognito_mode"
 	SignalPrivacySettings       = "privacy_settings"
@@ -38,8 +39,10 @@ const (
 	SignalActiveCall            = "active_call"
 	SignalAttestationMissing    = "attestation_missing"
 	SignalAttestationFailed     = "attestation_failed"
+	SignalAttestationDowngrade  = "attestation_downgrade"
 	SignalDeviceInconsistent    = "device_inconsistent"
 	SignalReportIncomplete      = "report_incomplete"
+	SignalProbeErrors           = "probe_errors"
 	SignalCustomRootCA          = "custom_root_ca"
 	SignalSecondaryUserProfile  = "secondary_user_profile"
 )
@@ -86,6 +89,14 @@ type Attestation struct {
 	RevocationChecked        bool   `json:"revocation_checked"`
 	PackageBound             bool   `json:"package_bound"`
 	SignerBound              bool   `json:"signer_bound"`
+
+	// AttestSkipped is the app's own reason for sending no attestation, such
+	// as "not_offered", "unsupported" or "timeout". Diagnostic only; it never
+	// lowers the score.
+	AttestSkipped string `json:"attest_skipped,omitempty"`
+	// Downgrade is true when an unproven or rejected report named an install
+	// an attested device owns, so it was answered unidentifiable.
+	Downgrade bool `json:"downgrade,omitempty"`
 
 	Mode        string `json:"mode,omitempty"`
 	AppID       string `json:"app_id,omitempty"`

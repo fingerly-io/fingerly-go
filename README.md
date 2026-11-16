@@ -120,11 +120,16 @@ high-risk Web payload), `event.VisitorID` is `""`; there are no `deferred_token`
 
 Trigger and risk-report signals include the `v: 3` anti-spoofing and integrity
 constants `SignalAttestationFailed` (`"attestation_failed"`),
+`SignalAttestationDowngrade` (`"attestation_downgrade"`),
 `SignalDeviceInconsistent` (`"device_inconsistent"`),
 `SignalReportIncomplete` (`"report_incomplete"`),
+`SignalProbeErrors` (`"probe_errors"`),
+`SignalFetchMetadataMissing` (`"fetch_metadata_missing"`),
 `SignalTampering` (`"tampering"`),
 `SignalCustomRootCA` (`"custom_root_ca"`) and
-`SignalSecondaryUserProfile` (`"secondary_user_profile"`).
+`SignalSecondaryUserProfile` (`"secondary_user_profile"`). A native
+`Attestation` also carries `AttestSkipped` (the app's reason for sending no
+proof) and `Downgrade` (the report named an install an attested device owns).
 
 ## Verify a backend action
 

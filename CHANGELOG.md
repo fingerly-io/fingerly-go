@@ -5,9 +5,11 @@
 - Refreshed the vendored v3 OpenAPI and contract fixtures, removing retired
   deferred supplement schemas and routes, and added `Event.Reason`,
   `Event.Identifiable()`, `Event.ParseDocument()`, `EventDocument`,
-  `Attestation`, and v3 signal constants (`SignalAttestationFailed`,
-  `SignalDeviceInconsistent`, `SignalReportIncomplete`, `SignalTampering`,
-  `SignalCustomRootCA`, `SignalSecondaryUserProfile`).
+  `Attestation` (with `AttestSkipped` and `Downgrade`), and v3 signal
+  constants (`SignalAttestationFailed`, `SignalAttestationDowngrade`,
+  `SignalDeviceInconsistent`, `SignalReportIncomplete`, `SignalProbeErrors`,
+  `SignalFetchMetadataMissing`, `SignalTampering`, `SignalCustomRootCA`,
+  `SignalSecondaryUserProfile`).
 - Updated `Proxy` to enforce the single-path `proxy.md` relay contract:
   sanitize-and-restore validation of `X-Fingerly-SDK-Platform`, rejection with
   HTTP `400` (`missing_origin`) when both `Origin` and a valid
