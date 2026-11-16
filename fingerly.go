@@ -50,12 +50,23 @@ type clientConfig struct {
 	apiVersion string
 	timeout    time.Duration
 	httpClient *http.Client
+
+	allowInsecureLoopback bool
 }
 
 // WithEndpoint overrides the default API origin, for a local or self-hosted
-// API. The key still decides which kind of key is accepted.
+// API. It must be a bare https:// origin: scheme, host and optional port, with
+// no path, query, fragment, credentials, space or control byte. The key still
+// decides which kind of key is accepted.
 func WithEndpoint(endpoint string) Option {
 	return func(c *clientConfig) { c.endpoint = endpoint }
+}
+
+// WithAllowInsecureLoopback accepts a plain http:// endpoint on 127.0.0.1,
+// localhost or [::1], for a local test harness only. Any other http:// host is
+// refused with or without it.
+func WithAllowInsecureLoopback() Option {
+	return func(c *clientConfig) { c.allowInsecureLoopback = true }
 }
 
 // WithAPIVersion selects a route version, such as "v2". The default is "v1",
@@ -107,7 +118,7 @@ func New(secretKey string, opts ...Option) *Client {
 	if origin == "" {
 		origin = defaultEndpoint
 	}
-	origin, err := normalizeOrigin(origin)
+	origin, err := normalizeEndpoint(origin, config.allowInsecureLoopback)
 	if err != nil {
 		client.configErr = err
 		return client

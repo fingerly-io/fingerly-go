@@ -90,7 +90,8 @@ var ErrResponseTooLarge = errors.New("fingerly: response body exceeds 4 MiB")
 
 // ConnectionError reports a read that got no complete answer from the API:
 // the connection was refused, reset or timed out, or the body broke off. Its
-// message never carries the secret key.
+// message names neither the secret key nor the endpoint; the transport error
+// stays reachable through errors.Unwrap for a caller that wants it.
 //
 // errors.Is(err, fingerly.ErrTimeout) is true when Timeout is, and the cause
 // stays reachable, so errors.Is(err, context.Canceled) still works.
@@ -102,10 +103,12 @@ type ConnectionError struct {
 
 // Error implements error.
 func (e *ConnectionError) Error() string {
+	// A transport error names the URL, host and port, so only the kind of
+	// failure is printed.
 	if e.Timeout {
-		return "fingerly: request timed out: " + e.cause.Error()
+		return "fingerly: request timed out"
 	}
-	return "fingerly: request failed: " + e.cause.Error()
+	return "fingerly: request failed"
 }
 
 // Unwrap returns the cause.

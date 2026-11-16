@@ -18,7 +18,12 @@ page, err := client.Events.List(ctx, &fingerly.EventListParams{Level: "high", Li
 
 Event reads require `fly_sk_{production|staging|development}_…` keys. Requests
 go to `https://api.fingerly.io`; `WithEndpoint` overrides that for a local
-API. Public, proxy, management, malformed and unsupported keys are rejected
+API. The endpoint must be a bare `https://` origin: scheme, host and optional
+port, with no path, query, fragment, credentials, space or control byte. A
+plain `http://` endpoint is accepted only for `127.0.0.1`, `localhost` or
+`[::1]`, and only together with `WithAllowInsecureLoopback()`, which is meant
+for a local test harness. Configuration errors never repeat the endpoint or the
+key. Public, proxy, management, malformed and unsupported keys are rejected
 before network access. Requests do not follow redirects. `Get` and `List` each
 perform one request and never retry.
 
@@ -69,7 +74,8 @@ case errors.Is(err, fingerly.ErrEventNotFound):
 
 A read that got no complete answer (refused, reset, timed out, or broken off
 mid-body) returns a `*fingerly.ConnectionError`, and
-`errors.Is(err, fingerly.ErrTimeout)` is true when a deadline passed. An
+`errors.Is(err, fingerly.ErrTimeout)` is true when a deadline passed. Its
+message names neither the key nor the endpoint. An
 answer over 4 MiB returns `fingerly.ErrResponseTooLarge`.
 
 Printing a `Client`, `Proxy` or `ProxyOptions` with any `fmt` verb, `slog` or

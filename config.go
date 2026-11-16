@@ -1,7 +1,6 @@
 package fingerly
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -54,11 +53,11 @@ func parseKey(key, expected string) (keyScope, error) {
 	return keyScope{Environment: match[2]}, nil
 }
 
-// normalizeOrigin validates a caller-supplied API origin.
+// normalizeOrigin validates a browser page origin, such as an AllowedOrigins
+// entry, which may be plain HTTP.
 //
-// Credentials, queries and fragments are refused: they would be attached to
-// every authenticated request, and embedded credentials would leak on a
-// redirect. The returned origin has no trailing slash.
+// Credentials, queries and fragments are refused. The returned origin has no
+// trailing slash.
 func normalizeOrigin(value string) (string, error) {
 	parsed, err := url.Parse(value)
 	if err != nil {
@@ -74,50 +73,59 @@ func normalizeOrigin(value string) (string, error) {
 	return strings.TrimRight(value, "/"), nil
 }
 
-// upstreamPattern is the byte range a proxy upstream may use: printable ASCII,
+// apiOriginPattern is the byte range an API origin may use: printable ASCII,
 // no space, no control byte, so a stray newline or CRLF cannot pass.
-var upstreamPattern = regexp.MustCompile(`\A[\x21-\x7e]+\z`)
+var apiOriginPattern = regexp.MustCompile(`\A[\x21-\x7e]+\z`)
 
-// errUpstreamOption is the one error for a malformed proxy upstream. It never
-// repeats the value, which may be a mistyped secret or an internal address.
-var errUpstreamOption = errors.New(
-	"fingerly: Upstream must be a bare https:// origin (scheme, host and optional port only)",
-)
+// normalizeUpstream validates the proxy's upstream origin.
+func normalizeUpstream(value string, allowInsecureLoopback bool) (string, error) {
+	return normalizeAPIOrigin(value, allowInsecureLoopback, "Upstream", "AllowInsecureLoopback")
+}
 
-// normalizeUpstream validates the proxy's upstream origin: scheme, host and
+// normalizeEndpoint validates the client's API origin.
+func normalizeEndpoint(value string, allowInsecureLoopback bool) (string, error) {
+	return normalizeAPIOrigin(value, allowInsecureLoopback, "endpoint", "WithAllowInsecureLoopback")
+}
+
+// normalizeAPIOrigin validates an origin a key is sent to: scheme, host and
 // optional port only, rebuilt from the parsed parts. HTTPS is required; plain
 // HTTP is accepted only for 127.0.0.1, localhost or [::1], and only when
-// allowInsecureLoopback is set for a local test harness.
-func normalizeUpstream(value string, allowInsecureLoopback bool) (string, error) {
-	if !upstreamPattern.MatchString(value) ||
+// allowInsecureLoopback is set for a local test harness. Errors never repeat
+// the value, which may be a mistyped secret or an internal address.
+func normalizeAPIOrigin(value string, allowInsecureLoopback bool, option, flag string) (string, error) {
+	malformed := fmt.Errorf(
+		"fingerly: %s must be a bare https:// origin (scheme, host and optional port only)", option,
+	)
+	if !apiOriginPattern.MatchString(value) ||
 		strings.ContainsAny(value, "?#") {
-		return "", errUpstreamOption
+		return "", malformed
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" ||
 		(parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" {
-		return "", errUpstreamOption
+		return "", malformed
 	}
 	host := parsed.Hostname()
 	if host == "" {
-		return "", errUpstreamOption
+		return "", malformed
 	}
 	if port := parsed.Port(); port != "" {
 		number, err := strconv.Atoi(port)
 		if err != nil || number < 1 || number > 65535 {
-			return "", errUpstreamOption
+			return "", malformed
 		}
 	}
 	switch parsed.Scheme {
 	case "https":
 	case "http":
 		if !allowInsecureLoopback || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
-			return "", errors.New(
-				"fingerly: a plain http:// Upstream is allowed only for 127.0.0.1, localhost or [::1] with AllowInsecureLoopback",
+			return "", fmt.Errorf(
+				"fingerly: a plain http:// %s is allowed only for 127.0.0.1, localhost or [::1] with %s",
+				option, flag,
 			)
 		}
 	default:
-		return "", errUpstreamOption
+		return "", malformed
 	}
 	return parsed.Scheme + "://" + parsed.Host, nil
 }
