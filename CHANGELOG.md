@@ -28,6 +28,9 @@
   forwarding of `Sec-Fetch-*` and `Sec-CH-UA-*` client metadata headers,
   optional cross-origin `AllowedOrigins` CORS handling, and verbatim raw-byte
   forwarding.
+- `NewProxy` requires `ProxyKey` and has no secret key option: every request
+  must present a public key of the proxy key's environment or gets a `401`,
+  and a secret key is never sent upstream.
 
 ## 0.2.0
 
