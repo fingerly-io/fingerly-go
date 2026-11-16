@@ -1,8 +1,12 @@
 package fingerly
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,16 +39,56 @@ func TestNewProxyAcceptsOnlyABareHTTPSUpstream(t *testing.T) {
 			Upstream: upstream, AllowInsecureLoopback: loopback,
 		})
 	}
-	for _, upstream := range []string{"http://upstream.invalid", "http://192.0.2.10:8080"} {
+	for _, upstream := range []string{
+		"http://upstream.invalid",
+		"http://192.0.2.10:8080",
+		"https://upstream.invalid/prefix",
+		"https://upstream.invalid/a/../b",
+		"https://upstream.invalid//",
+		"https://upstream.invalid/%2e",
+		"https://upstream.invalid\n",
+		"https://upstream.invalid ",
+		" https://upstream.invalid",
+		"https://upstream.invalid\r\nx-injected: 1",
+		"https://upstream.invalid\t",
+		"https://upstream.invalid?",
+		"https://upstream.invalid?a=b",
+		"https://upstream.invalid#",
+		"https://upstream.invalid#a",
+		"https://user:pass@upstream.invalid",
+		"https://upstream.invalid:0",
+		"https://upstream.invalid:99999",
+		"https://",
+		"ftp://upstream.invalid",
+		"file:///private",
+		"upstream.invalid",
+	} {
 		for _, loopback := range []bool{false, true} {
 			if _, err := build(upstream, loopback); err == nil {
 				t.Errorf("%q (loopback %v) was accepted", upstream, loopback)
+			} else if strings.Contains(err.Error(), "upstream.invalid") || strings.Contains(err.Error(), "192.0.2.10") {
+				t.Errorf("%q: the error repeats the value: %v", upstream, err)
 			}
 		}
 	}
 	for _, upstream := range []string{"http://127.0.0.1:8080", "http://localhost", "http://[::1]:8080"} {
 		if _, err := build(upstream, false); err == nil {
 			t.Errorf("%q was accepted without AllowInsecureLoopback", upstream)
+		}
+	}
+	for upstream, want := range map[string]string{
+		"https://upstream.invalid":      "https://upstream.invalid/api/v1/ingest",
+		"https://upstream.invalid/":     "https://upstream.invalid/api/v1/ingest",
+		"https://upstream.invalid:8443": "https://upstream.invalid:8443/api/v1/ingest",
+		"HTTPS://upstream.invalid":      "https://upstream.invalid/api/v1/ingest",
+	} {
+		proxy, err := build(upstream, false)
+		if err != nil {
+			t.Errorf("%q: %v", upstream, err)
+			continue
+		}
+		if proxy.upstreamURL != want {
+			t.Errorf("%q: upstream URL %q, want %q", upstream, proxy.upstreamURL, want)
 		}
 	}
 	for upstream, want := range map[string]string{
@@ -60,9 +104,6 @@ func TestNewProxyAcceptsOnlyABareHTTPSUpstream(t *testing.T) {
 		if proxy.upstreamURL != want {
 			t.Errorf("%q: upstream URL %q, want %q", upstream, proxy.upstreamURL, want)
 		}
-	}
-	if _, err := build("https://upstream.invalid", false); err != nil {
-		t.Errorf("https upstream refused: %v", err)
 	}
 }
 
@@ -162,5 +203,69 @@ func TestProxyMethodIsCaseSensitiveAndEveryRefusalIsUncacheable(t *testing.T) {
 	}
 	if len(rec.requests) != 0 {
 		t.Errorf("%d refused requests reached upstream", len(rec.requests))
+	}
+}
+
+// Failure reports name the kind of failure only, never the upstream host, port
+// or URL, whether they go to OnError or to the default log line.
+func TestProxyFailureReportsNameNeitherTheUpstreamNorTheKey(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	port := closedURL[strings.LastIndex(closedURL, ":")+1:]
+	if _, err := strconv.Atoi(port); err != nil {
+		t.Fatalf("port %q", port)
+	}
+	redirect := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://127.0.0.1:1/elsewhere")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+	huge := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), maxRelayBytes+1))
+	})
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attr
+		},
+	})))
+	defer slog.SetDefault(previous)
+
+	for _, upstream := range []string{closedURL, redirect.server.URL, huge.server.URL} {
+		var hooked []string
+		for _, hook := range []func(*http.Request, *ProxyError){
+			func(_ *http.Request, failure *ProxyError) { hooked = append(hooked, failure.Error()) },
+			nil,
+		} {
+			proxy, err := NewProxy(ProxyOptions{
+				ProxyKey: testProxyKey, Path: proxyPath, Upstream: upstream, AllowInsecureLoopback: true,
+				ClientIP: func(*http.Request) string { return "203.0.113.5" },
+				OnError:  hook,
+			})
+			if err != nil {
+				t.Fatalf("NewProxy: %v", err)
+			}
+			response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+			body, _ := io.ReadAll(response.Body)
+			if response.StatusCode != http.StatusBadGateway || string(body) != "Bad gateway" {
+				t.Errorf("%s: %d %q", upstream, response.StatusCode, body)
+			}
+		}
+		if len(hooked) != 1 {
+			t.Fatalf("%s: OnError got %v", upstream, hooked)
+		}
+		for _, text := range []string{hooked[0], logged.String()} {
+			for _, forbidden := range []string{"127.0.0.1", port, "ingest", testProxyKey, testPublicKey, "elsewhere"} {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("%s: report %q names %q", upstream, text, forbidden)
+				}
+			}
+		}
+		logged.Reset()
 	}
 }

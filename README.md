@@ -302,12 +302,13 @@ re-encoded) to one URL, `https://api.fingerly.io/api/v1/ingest` (`APIVersion`
 and `Upstream` change its version and origin). Event reads need a secret key and
 stay unreachable from a browser by construction.
 
-`Upstream` must use `https://`, or `NewProxy` returns an error. A plain
-`http://` upstream is accepted only for `127.0.0.1`, `localhost` or `[::1]`,
-and only with `AllowInsecureLoopback: true`, which is meant for a local test
-harness. Redirects are never followed, with the shared pool or your own
-`Transport`; an upstream `3xx`, or a status outside `200`
-to `599`, gets `502`.
+`Upstream` must be a bare `https://` origin: scheme, host and optional port,
+with no path, query, fragment, credentials, space or control byte, or
+`NewProxy` returns an error. A plain `http://` upstream is accepted only for
+`127.0.0.1`, `localhost` or `[::1]`, and only with `AllowInsecureLoopback: true`,
+which is meant for a local test harness. Redirects are never followed, with the
+shared pool or your own `Transport`; an upstream `3xx`, or a status outside
+`200` to `599`, gets `502`.
 
 The caller must present a public key from the same environment as the proxy
 key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
@@ -343,7 +344,9 @@ set `ReadHeaderTimeout` and `ReadTimeout` on it. A bare `http.ListenAndServe`
 has neither.
 
 Each failure is reported once: to `ProxyOptions.OnError` if you set it,
-otherwise as one line through `slog.Default()`.
+otherwise as one line through `slog.Default()`. `failure.Err` names the kind of
+failure only (a timeout, an unreachable upstream, a TLS failure, an unrelayable
+status or answer), never the upstream host, port or URL, and never a key.
 
 ```go
 OnError: func(r *http.Request, failure *fingerly.ProxyError) {

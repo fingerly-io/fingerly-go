@@ -3,6 +3,7 @@ package fingerly
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -108,7 +109,9 @@ type ProxyOptions struct {
 	Path string
 	// APIVersion selects the upstream ingest URL. Defaults to "v1".
 	APIVersion string
-	// Upstream overrides the API origin. It must use https://.
+	// Upstream overrides the API origin. It must be a bare https:// origin:
+	// scheme, host and optional port, with no path, query, fragment,
+	// credentials, space or control byte.
 	Upstream string
 	// AllowInsecureLoopback accepts a plain http:// Upstream on 127.0.0.1,
 	// localhost or [::1], for a local test harness only. Any other http://
@@ -177,7 +180,9 @@ var errNoClientIP = errors.New("the client IP callback returned no valid address
 type ProxyError struct {
 	// Status is what the browser was answered: 502, 504 or 500.
 	Status int
-	// Err is the underlying cause.
+	// Err is the kind of failure: a timeout, an unreachable upstream, a TLS
+	// failure, an unrelayable status or answer. It never names the upstream
+	// host, port or URL.
 	Err error
 }
 
@@ -372,7 +377,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if response.StatusCode < 200 || response.StatusCode > 599 ||
 		(response.StatusCode >= 300 && response.StatusCode < 400) {
 		_ = response.Body.Close()
-		p.fail(w, r, fmt.Errorf("upstream answered status %d", response.StatusCode))
+		p.fail(w, r, errUpstreamStatus)
 		return
 	}
 	upstreamBody, err := readUpstream(response)
@@ -396,8 +401,44 @@ func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if isTimeout(err) {
 		status = http.StatusGatewayTimeout
 	}
-	p.report(r, &ProxyError{Status: status, Err: err})
+	p.report(r, &ProxyError{Status: status, Err: failureKind(err)})
 	refuse(w, status)
+}
+
+// Upstream failure kinds. A transport error names the upstream URL, host and
+// port, so what is reported is the kind of failure only.
+var (
+	errUpstreamTimeout     = fmt.Errorf("upstream timed out: %w", context.DeadlineExceeded)
+	errUpstreamUnreachable = errors.New("upstream unreachable")
+	errUpstreamTLS         = errors.New("upstream TLS handshake failed")
+	errUpstreamStatus      = errors.New("upstream answered an unrelayable status")
+	errUpstreamUnreadable  = errors.New("upstream answer unreadable")
+)
+
+// failureKind maps an upstream failure to one of the kinds above.
+func failureKind(err error) error {
+	switch {
+	case errors.Is(err, errUpstreamTooLarge), errors.Is(err, errUpstreamStatus),
+		errors.Is(err, errUpstreamTimeout):
+		return err
+	case isTimeout(err):
+		return errUpstreamTimeout
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		// Not a transport error: the body broke while it was read.
+		return errUpstreamUnreadable
+	}
+	var tlsRecord tls.RecordHeaderError
+	var tlsVerify *tls.CertificateVerificationError
+	var opErr *net.OpError
+	switch {
+	case errors.As(err, &tlsRecord), errors.As(err, &tlsVerify):
+		return errUpstreamTLS
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return errUpstreamUnreachable
+	}
+	return errUpstreamUnreadable
 }
 
 // report hands a failure to OnError, or logs one line about it.

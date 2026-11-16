@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,27 +74,52 @@ func normalizeOrigin(value string) (string, error) {
 	return strings.TrimRight(value, "/"), nil
 }
 
-// normalizeUpstream validates the proxy's upstream origin. HTTPS is required;
-// plain HTTP is accepted only for 127.0.0.1, localhost or [::1], and only when
+// upstreamPattern is the byte range a proxy upstream may use: printable ASCII,
+// no space, no control byte, so a stray newline or CRLF cannot pass.
+var upstreamPattern = regexp.MustCompile(`\A[\x21-\x7e]+\z`)
+
+// errUpstreamOption is the one error for a malformed proxy upstream. It never
+// repeats the value, which may be a mistyped secret or an internal address.
+var errUpstreamOption = errors.New(
+	"fingerly: Upstream must be a bare https:// origin (scheme, host and optional port only)",
+)
+
+// normalizeUpstream validates the proxy's upstream origin: scheme, host and
+// optional port only, rebuilt from the parsed parts. HTTPS is required; plain
+// HTTP is accepted only for 127.0.0.1, localhost or [::1], and only when
 // allowInsecureLoopback is set for a local test harness.
 func normalizeUpstream(value string, allowInsecureLoopback bool) (string, error) {
-	origin, err := normalizeOrigin(value)
-	if err != nil {
-		return "", err
+	if !upstreamPattern.MatchString(value) ||
+		strings.ContainsAny(value, "?#") {
+		return "", errUpstreamOption
 	}
-	parsed, err := url.Parse(origin)
-	if err != nil {
-		return "", err
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" {
+		return "", errUpstreamOption
 	}
-	if parsed.Scheme == "http" {
-		host := parsed.Hostname()
+	host := parsed.Hostname()
+	if host == "" {
+		return "", errUpstreamOption
+	}
+	if port := parsed.Port(); port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return "", errUpstreamOption
+		}
+	}
+	switch parsed.Scheme {
+	case "https":
+	case "http":
 		if !allowInsecureLoopback || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
 			return "", errors.New(
 				"fingerly: a plain http:// Upstream is allowed only for 127.0.0.1, localhost or [::1] with AllowInsecureLoopback",
 			)
 		}
+	default:
+		return "", errUpstreamOption
 	}
-	return origin, nil
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 // normalizeAPIVersion validates a route version before it is put in a URL.
