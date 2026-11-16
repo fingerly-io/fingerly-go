@@ -90,9 +90,6 @@ func validSDKPlatform(values []string) string {
 type ProxyOptions struct {
 	// ProxyKey is a write-only credential, fly_px_…, held only on your server.
 	ProxyKey string
-	// SecretKey is the deprecated alternative to ProxyKey. Secret read keys
-	// will be refused in the next major version; do not pass both.
-	SecretKey string
 
 	// ClientIP resolves the visitor's address, which must be exactly one IPv4
 	// or IPv6 literal. Read it from a header your own infrastructure sets,
@@ -158,7 +155,6 @@ type ProxyOptions struct {
 type Proxy struct {
 	key            string
 	scope          keyScope
-	usesProxyKey   bool
 	upstreamURL    string
 	path           string
 	maxBodyBytes   int64
@@ -199,30 +195,22 @@ func (e *ProxyError) Unwrap() error { return e.Err }
 // Unlike New, this reports configuration errors immediately: a proxy is wired
 // up once at start-up, where an error is natural to handle.
 func NewProxy(options ProxyOptions) (*Proxy, error) {
-	if options.ProxyKey == "" && options.SecretKey == "" {
+	if options.ProxyKey == "" {
 		return nil, errors.New("fingerly: a Fingerly proxy key is required")
-	}
-	if options.ProxyKey != "" && options.SecretKey != "" {
-		return nil, errors.New("fingerly: pass ProxyKey or deprecated SecretKey, not both")
 	}
 	if options.ClientIP == nil {
 		return nil, errors.New("fingerly: ClientIP is required")
 	}
 
 	proxy := &Proxy{
-		usesProxyKey: options.ProxyKey != "",
 		clientIP:     options.ClientIP,
 		maxBodyBytes: defaultMaxBodyBytes,
 		onError:      options.OnError,
 		badClientIP:  &sync.Once{},
 	}
 	proxy.key = options.ProxyKey
-	kind := keyProxy
-	if !proxy.usesProxyKey {
-		proxy.key, kind = options.SecretKey, keySecret
-	}
 
-	scope, err := parseKey(proxy.key, kind)
+	scope, err := parseKey(proxy.key, keyProxy)
 	if err != nil {
 		return nil, err
 	}
@@ -481,12 +469,8 @@ func readUpstream(response *http.Response) ([]byte, error) {
 // upstreamKeyFor decides which key to present upstream.
 //
 // With a proxy key the browser must supply a public key for the same
-// environment, which the proxy forwards alongside its own. The deprecated
-// secret-key mode authenticates on its own.
+// environment, which the proxy forwards alongside its own.
 func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
-	if !p.usesProxyKey {
-		return p.key, true
-	}
 	browser, err := parseKey(presented, keyPublic)
 	if err != nil {
 		return "", false
@@ -513,9 +497,7 @@ func (p *Proxy) setUpstreamHeaders(
 	request.Header.Set("X-Fingerly-User-Agent", incoming.Header.Get("User-Agent"))
 	request.Header.Set("X-Fingerly-Proxy-Version", proxyVersion)
 	request.Header.Set("User-Agent", userAgent)
-	if p.usesProxyKey {
-		request.Header.Set("X-Fingerly-Proxy-Key", p.key)
-	}
+	request.Header.Set("X-Fingerly-Proxy-Key", p.key)
 	// One channel only: the API refuses a proxied request that names both, and
 	// a non-empty origin is the browser channel, which is what the API picks
 	// for the same request sent directly.

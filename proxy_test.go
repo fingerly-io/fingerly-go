@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,7 +69,6 @@ func TestNewProxyRejectsInvalidOptions(t *testing.T) {
 	clientIP := func(*http.Request) string { return "203.0.113.5" }
 	for name, options := range map[string]ProxyOptions{
 		"no key":        {ClientIP: clientIP},
-		"both keys":     {ProxyKey: testProxyKey, SecretKey: testSecretKey, ClientIP: clientIP},
 		"no client ip":  {ProxyKey: testProxyKey},
 		"secret as prx": {ProxyKey: testSecretKey, ClientIP: clientIP},
 		"public as prx": {ProxyKey: testPublicKey, ClientIP: clientIP},
@@ -400,24 +400,52 @@ func TestProxyMountsOnAServeMux(t *testing.T) {
 	}
 }
 
-func TestProxyForwardsTheSecretKeyWithoutAPublicKey(t *testing.T) {
-	proxy, rec := newProxy(t, func(o *ProxyOptions) {
-		o.ProxyKey, o.SecretKey = "", testSecretKey
-	})
-	// No public key: the deprecated secret-key mode authenticates on its own.
-	response := call(proxy, http.MethodPost, proxyPath, map[string]string{
-		"X-Real-IP": "203.0.113.5",
-		"Origin":    "https://shop.test",
-	}, "{}")
+func TestProxyOptionsHaveNoSecretKey(t *testing.T) {
+	options := reflect.TypeOf(ProxyOptions{})
+	for i := 0; i < options.NumField(); i++ {
+		if name := options.Field(i).Name; strings.Contains(strings.ToLower(name), "secret") {
+			t.Errorf("ProxyOptions has a secret-key field %q", name)
+		}
+	}
+	if _, err := NewProxy(ProxyOptions{ClientIP: func(*http.Request) string { return "203.0.113.5" }}); err == nil {
+		t.Error("a proxy without a proxy key was built")
+	}
+}
+
+func TestProxyNeverSendsTheSecretKeyUpstream(t *testing.T) {
+	proxy, rec := newProxy(t, nil)
+	// Without a public key, and with a secret key in its place, nothing is forwarded.
+	for name, key := range map[string]string{"missing": "", "secret key": testSecretKey} {
+		headers := browserHeaders()
+		headers["X-API-Key"] = key
+		response := call(proxy, http.MethodPost, proxyPath, headers, "{}")
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, response.StatusCode)
+		}
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control %q", name, got)
+		}
+	}
+	if len(rec.requests) != 0 {
+		t.Fatalf("%d refused requests reached the upstream", len(rec.requests))
+	}
+	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", response.StatusCode)
 	}
 	forwarded := rec.requests[0]
-	if got := forwarded.Header.Get("X-API-Key"); got != testSecretKey {
-		t.Errorf("X-API-Key is %q", got)
+	if got := forwarded.Header.Get("X-API-Key"); got != testPublicKey {
+		t.Errorf("X-API-Key is %q, want the browser's public key", got)
 	}
-	if got := forwarded.Header.Get("X-Fingerly-Proxy-Key"); got != "" {
-		t.Errorf("a proxy key was sent in secret-key mode: %q", got)
+	if got := forwarded.Header.Get("X-Fingerly-Proxy-Key"); got != testProxyKey {
+		t.Errorf("X-Fingerly-Proxy-Key is %q", got)
+	}
+	for name, values := range forwarded.Header {
+		for _, value := range values {
+			if strings.Contains(value, "fly_sk_") {
+				t.Errorf("%s carries a secret key upstream", name)
+			}
+		}
 	}
 }
 
