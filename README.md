@@ -304,7 +304,8 @@ stay unreachable from a browser by construction.
 `http://` upstream is accepted only for `127.0.0.1`, `localhost` or `[::1]`,
 and only with `AllowInsecureLoopback: true`, which is meant for a local test
 harness. Redirects are never followed, with the shared pool or your own
-`Transport`; an upstream `3xx` gets `502`.
+`Transport`; an upstream `3xx`, or a status outside `200`
+to `599`, gets `502`.
 
 The caller must present a public key from the same environment as the proxy
 key, or the request gets `401`. Incoming headers follow the sanitize-and-restore

@@ -101,3 +101,29 @@ func TestProxyAnswersARedirectAsBadGatewayAndNeverFollowsIt(t *testing.T) {
 		t.Errorf("the redirect target was called %d times", n)
 	}
 }
+
+func TestProxyAnswersAnUpstreamStatusOutsideTheRangeAsBadGateway(t *testing.T) {
+	for _, status := range []string{"000 Odd", "099 Odd", "199 Odd", "600 Odd", "700 Odd", "999 Odd"} {
+		rec := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer connection.Close()
+			_, _ = connection.Write([]byte("HTTP/1.1 " + status + "\r\nContent-Length: 0\r\n\r\n"))
+		})
+		proxy, err := NewProxy(ProxyOptions{
+			ProxyKey: testProxyKey, Path: proxyPath, Upstream: rec.server.URL, AllowInsecureLoopback: true,
+			ClientIP: func(*http.Request) string { return "203.0.113.5" },
+			OnError:  func(*http.Request, *ProxyError) {},
+		})
+		if err != nil {
+			t.Fatalf("NewProxy: %v", err)
+		}
+		response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")
+		if response.StatusCode != http.StatusBadGateway || response.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: status %d, Cache-Control %q", status, response.StatusCode, response.Header.Get("Cache-Control"))
+		}
+	}
+}
