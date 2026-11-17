@@ -5,82 +5,29 @@ import (
 	"time"
 )
 
-// Canonical v3 risk signal and signal-group identifiers reported on events and
-// archived risk assessments.
-const (
-	SignalTor                   = "tor"
-	SignalDatacenterProxy       = "datacenter_proxy"
-	SignalResidentialProxy      = "residential_proxy"
-	SignalVPN                   = "vpn"
-	SignalIPBlocklist           = "ip_blocklist"
-	SignalIPReputation          = "ip_reputation"
-	SignalNetworkAnomaly        = "network_anomaly"
-	SignalLocationSpoofing      = "location_spoofing"
-	SignalIOSSimulator          = "ios_simulator"
-	SignalAndroidEmulator       = "android_emulator"
-	SignalVirtualMachine        = "virtual_machine"
-	SignalJailbrokenDevice      = "jailbroken_device"
-	SignalRootedDevice          = "rooted_device"
-	SignalClonedApp             = "cloned_app"
-	SignalDeviceFarm            = "device_farm"
-	SignalMITMAttack            = "mitm_attack"
-	SignalFridaDetected         = "frida_detected"
-	SignalBrowserTampering      = "browser_tampering"
-	SignalTampering             = "tampering"
-	SignalFingerprintSuppressed = "fingerprint_suppressed"
-	SignalDeveloperTools        = "developer_tools"
-	SignalRemoteControl         = "remote_control"
-	SignalBot                   = "bot"
-	SignalFetchMetadataMissing  = "fetch_metadata_missing"
-	SignalWebTicketMissing      = "web_ticket_missing"
-	SignalWebTicketInvalid      = "web_ticket_invalid"
-	SignalHighActivity          = "high_activity"
-	SignalIncognitoMode         = "incognito_mode"
-	SignalPrivacySettings       = "privacy_settings"
-	SignalEmbeddedWebView       = "embedded_web_view"
-	SignalActiveCall            = "active_call"
-	SignalAttestationMissing    = "attestation_missing"
-	SignalAttestationFailed     = "attestation_failed"
-	SignalAttestationDowngrade  = "attestation_downgrade"
-	SignalDeviceInconsistent    = "device_inconsistent"
-	SignalReportIncomplete      = "report_incomplete"
-	SignalProbeErrors           = "probe_errors"
-	SignalCustomRootCA          = "custom_root_ca"
-	SignalSecondaryUserProfile  = "secondary_user_profile"
-)
-
-// Platform-neutral hardware attestation states and statuses.
-const (
-	AttestationStateAttested    = "attested"
-	AttestationStateNotAttested = "not_attested"
-	AttestationStateFailed      = "failed"
-
-	AttestationStatusVerified      = "verified"
-	AttestationStatusIndeterminate = "indeterminate"
-	AttestationStatusInvalid       = "invalid"
-	AttestationStatusAbsent        = "absent"
-	AttestationStatusUnconfigured  = "unconfigured"
-)
-
 // EventTrigger is one signal group that contributed to an event's score.
 type EventTrigger struct {
-	// Signal is the signal group, such as "vpn", "bot", or "attestation_failed".
-	Signal string `json:"signal"`
+	// Signal is the signal group, such as SignalVPN, SignalBot or
+	// SignalAttestationFailed.
+	Signal Signal `json:"signal"`
 	// Weight is the group's combined weight in this score.
 	Weight int `json:"weight"`
-	// Confidence is "low", "medium" or "high".
-	Confidence string `json:"confidence,omitempty"`
+	// Confidence is ConfidenceLow, ConfidenceMedium or ConfidenceHigh.
+	Confidence Confidence `json:"confidence,omitempty"`
 }
 
 // Attestation is the platform-neutral hardware attestation verdict inside an
 // archived event document.
 type Attestation struct {
-	// State is "attested", "not_attested" or "failed".
-	State    string `json:"state"`
-	Platform string `json:"platform,omitempty"`
-	// Status is "verified", "indeterminate", "invalid", "absent" or "unconfigured".
-	Status string `json:"status"`
-	Reason string `json:"reason,omitempty"`
+	// State is AttestationStateAttested, AttestationStateNotAttested or
+	// AttestationStateFailed.
+	State    AttestationState `json:"state"`
+	Platform string           `json:"platform,omitempty"`
+	// Status is AttestationStatusVerified, AttestationStatusIndeterminate,
+	// AttestationStatusInvalid, AttestationStatusAbsent or
+	// AttestationStatusUnconfigured.
+	Status AttestationStatus `json:"status"`
+	Reason string            `json:"reason,omitempty"`
 
 	ChainLength              int    `json:"chain_length,omitempty"`
 	AttestationSecurityLevel string `json:"attestation_security_level,omitempty"`
@@ -93,9 +40,9 @@ type Attestation struct {
 	SignerBound              bool   `json:"signer_bound"`
 
 	// AttestSkipped is the app's own reason for sending no attestation, such
-	// as "not_offered", "unsupported" or "timeout". Diagnostic only; it never
-	// lowers the score.
-	AttestSkipped string `json:"attest_skipped,omitempty"`
+	// as AttestSkippedNotOffered, AttestSkippedUnsupported or
+	// AttestSkippedTimeout. Diagnostic only; it never lowers the score.
+	AttestSkipped AttestSkippedReason `json:"attest_skipped,omitempty"`
 	// Downgrade is true when an unproven or rejected report named an install
 	// an attested device owns, so it was answered unidentifiable.
 	Downgrade bool `json:"downgrade,omitempty"`
@@ -119,19 +66,20 @@ type EventDocumentSDK struct {
 
 // EventRiskTrigger is one raw detector recorded inside an archived risk report.
 type EventRiskTrigger struct {
-	Signal     string `json:"signal"`
-	Weight     int    `json:"weight"`
-	Confidence string `json:"confidence,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	// Signal is the raw detector, such as SignalVPNPublic.
+	Signal     Signal     `json:"signal"`
+	Weight     int        `json:"weight"`
+	Confidence Confidence `json:"confidence,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
 }
 
 // EventRiskReport is the scoring assessment recorded inside an archived document.
 type EventRiskReport struct {
-	Platform  string             `json:"platform"`
+	Platform  RiskPlatform       `json:"platform"`
 	Score     int                `json:"score"`
-	Level     string             `json:"level"`
+	Level     SuspectLevel       `json:"level"`
 	Threshold int                `json:"threshold"`
-	Source    string             `json:"source"`
+	Source    RiskSource         `json:"source"`
 	Revision  int64              `json:"revision,omitempty"`
 	Triggers  []EventRiskTrigger `json:"triggers"`
 }
@@ -165,18 +113,20 @@ type Event struct {
 	// the submission was unidentifiable (identifiable == false).
 	VisitorID  string    `json:"visitor_id"`
 	OccurredAt time.Time `json:"occurred_at"`
-	// State is "enriched", or "unavailable" when the network lookup could not run.
-	State string `json:"state"`
+	// State is EventStateEnriched, or EventStateUnavailable when the network
+	// lookup could not run.
+	State EventState `json:"state"`
 	// Reason explains why enrichment did not happen on an unavailable event.
 	Reason string `json:"reason,omitempty"`
 
-	Environment string `json:"environment"`
+	// Environment is the deployment the event was recorded in.
+	Environment Environment `json:"environment"`
 	// Platform is the scoring profile applied; SDKPlatform is what the SDK
 	// called itself. They differ: react-native-ios reports itself as such and
-	// is scored as ios.
-	Platform    string `json:"platform"`
-	SDKPlatform string `json:"sdk_platform"`
-	SDKVersion  string `json:"sdk_version"`
+	// is scored as RiskPlatformIOS.
+	Platform    RiskPlatform `json:"platform"`
+	SDKPlatform string       `json:"sdk_platform"`
+	SDKVersion  string       `json:"sdk_version"`
 
 	Origin  string `json:"origin,omitempty"`
 	URLHost string `json:"url_host,omitempty"`
@@ -192,9 +142,10 @@ type Event struct {
 	CountryName string `json:"country_name,omitempty"`
 	ASN         string `json:"asn,omitempty"`
 	ASNName     string `json:"asn_name,omitempty"`
-	// AnonymityNetwork is "tor", "vpn", "proxy" or "hosting". Empty on an
-	// ordinary consumer connection, which is most of them.
-	AnonymityNetwork string `json:"anonymity_network,omitempty"`
+	// AnonymityNetwork is AnonymityNetworkTor, AnonymityNetworkRelay,
+	// AnonymityNetworkVPN, AnonymityNetworkProxy or AnonymityNetworkHosting.
+	// Empty on an ordinary consumer connection, which is most of them.
+	AnonymityNetwork AnonymityNetwork `json:"anonymity_network,omitempty"`
 
 	Agent        string `json:"agent,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
@@ -204,8 +155,9 @@ type Event struct {
 
 	// SuspectScore is nil when the request was not scored. Never read nil as 0.
 	SuspectScore *int `json:"suspect_score"`
-	// SuspectLevel is "low", "medium" or "high". Empty when not scored.
-	SuspectLevel string `json:"suspect_level,omitempty"`
+	// SuspectLevel is SuspectLevelLow, SuspectLevelMedium or
+	// SuspectLevelHigh. Empty when not scored.
+	SuspectLevel SuspectLevel `json:"suspect_level,omitempty"`
 
 	// Triggers is never nil from the API: an event about which nothing fired
 	// carries an empty list.
@@ -280,6 +232,7 @@ type EventListParams struct {
 	Limit int
 	// Visitor restricts the listing to one exact visitor id.
 	Visitor string
-	// Level restricts it to "low", "medium" or "high".
-	Level string
+	// Level restricts it to SuspectLevelLow, SuspectLevelMedium or
+	// SuspectLevelHigh.
+	Level SuspectLevel
 }

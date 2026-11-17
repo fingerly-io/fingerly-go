@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0
+
+- Added named string types with a constant per value for every closed set the
+  API reports: `Signal` (every signal group and raw detector, including the
+  detectors `SignalVPNPublic`, `SignalProxy`, `SignalRepeatedReinstall`,
+  `SignalDeviceActivityHigh` and the rest), `SuspectLevel`, `Confidence`,
+  `AttestationState`, `AttestationStatus`, `AttestSkippedReason`,
+  `EventState` (including `pending`), `AnonymityNetwork`
+  (including `relay`), `Environment`, `RiskPlatform`, `RiskSource`,
+  `WebhookEventType` and `WebhookEnvironment`, and `VerifyReasonOK` for the
+  `""` reason of a passed verification.
+- Breaking: the matching fields now have those types (`Event.SuspectLevel`,
+  `Event.State`, `Event.Environment`, `Event.Platform`,
+  `Event.AnonymityNetwork`, `EventTrigger.Signal` and `Confidence`,
+  `EventRiskTrigger.Signal` and `Confidence`, `EventRiskReport.Platform`,
+  `Level` and `Source`, `Attestation.State`, `Status` and `AttestSkipped`,
+  `EventListParams.Level`, `WebhookEvent.Type` and `Environment`), and the
+  `Signal*`, `AttestationState*` and `AttestationStatus*` constants are typed.
+  Comparing with a constant or a string literal is unchanged; a `string`
+  variable needs a conversion, such as `fingerly.Signal(name)`. Values the
+  server adds later still decode.
+
 ## 0.3.0
 
 - Added `Events.Verify(ctx, requestID, *VerifyOptions)`, which reads an event

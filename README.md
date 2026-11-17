@@ -32,7 +32,7 @@ Go 1.22 or newer. No dependencies outside the standard library.
 **2. Install.**
 
 ```sh
-go get github.com/fingerly-io/fingerly-go@v0.3.0
+go get github.com/fingerly-io/fingerly-go@v0.4.0
 ```
 
 **3. Read an event.**
@@ -43,7 +43,7 @@ import fingerly "github.com/fingerly-io/fingerly-go"
 client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
 
 event, err := client.Events.Get(ctx, requestID)
-page, err := client.Events.List(ctx, &fingerly.EventListParams{Level: "high", Limit: 50})
+page, err := client.Events.List(ctx, &fingerly.EventListParams{Level: fingerly.SuspectLevelHigh, Limit: 50})
 ```
 
 **4. Verify a webhook.**
@@ -154,7 +154,28 @@ If the event is not recorded yet, the error matches `ErrEventPending` and its `*
 
 The archived `Document` arrives moments after the event itself, so check `HasDocument` rather than assuming it is there, and call `event.ParseDocument()` to decode it into a typed `*EventDocument` (including `*Attestation` and `*EventRiskReport`). When a submission is unidentifiable (`!event.Identifiable()`, such as insufficient entropy, a genuine embedded WebView, or an unmatched high-risk Web payload), `event.VisitorID` is `""`; there are no `deferred_token`, `deferred_signals` or `supplements` fields in `v: 3`.
 
-Trigger and risk-report signals include the `v: 3` anti-spoofing and integrity constants `SignalAttestationFailed` (`"attestation_failed"`), `SignalAttestationDowngrade` (`"attestation_downgrade"`), `SignalDeviceInconsistent` (`"device_inconsistent"`), `SignalReportIncomplete` (`"report_incomplete"`), `SignalProbeErrors` (`"probe_errors"`), `SignalFetchMetadataMissing` (`"fetch_metadata_missing"`), `SignalWebTicketMissing` (`"web_ticket_missing"`), `SignalWebTicketInvalid` (`"web_ticket_invalid"`), `SignalTampering` (`"tampering"`), `SignalCustomRootCA` (`"custom_root_ca"`) and `SignalSecondaryUserProfile` (`"secondary_user_profile"`). A native `Attestation` also carries `AttestSkipped` (the app's reason for sending no proof) and `Downgrade` (the report named an install an attested device owns).
+Every closed set the API reports is a named string type with a constant per value, so compare against the constants rather than string literals:
+
+| Type | Fields | Constants |
+| --- | --- | --- |
+| `Signal` | `EventTrigger.Signal` (groups), `EventRiskTrigger.Signal` (raw detectors) | `SignalVPN`, `SignalBot`, `SignalFingerprintSuppressed`, `SignalAttestationFailed`, `SignalVPNPublic`, ... (every group and detector) |
+| `SuspectLevel` | `Event.SuspectLevel`, `EventRiskReport.Level`, `EventListParams.Level` | `SuspectLevelLow`, `SuspectLevelMedium`, `SuspectLevelHigh` |
+| `Confidence` | `EventTrigger.Confidence`, `EventRiskTrigger.Confidence` | `ConfidenceLow`, `ConfidenceMedium`, `ConfidenceHigh` |
+| `AttestationState` | `Attestation.State` | `AttestationStateAttested`, `AttestationStateNotAttested`, `AttestationStateFailed` |
+| `AttestationStatus` | `Attestation.Status` | `AttestationStatusVerified`, `AttestationStatusIndeterminate`, `AttestationStatusInvalid`, `AttestationStatusAbsent`, `AttestationStatusUnconfigured` |
+| `AttestSkippedReason` | `Attestation.AttestSkipped` | `AttestSkippedNotOffered`, `AttestSkippedUnsupported`, `AttestSkippedChallengeUnavailable`, `AttestSkippedKeyError`, `AttestSkippedTimeout`, `AttestSkippedBackoff`, `AttestSkippedInstallUnavailable` |
+| `EventState` | `Event.State` | `EventStatePending`, `EventStateEnriched`, `EventStateUnavailable` |
+| `AnonymityNetwork` | `Event.AnonymityNetwork` | `AnonymityNetworkTor`, `AnonymityNetworkRelay`, `AnonymityNetworkVPN`, `AnonymityNetworkProxy`, `AnonymityNetworkHosting` |
+| `Environment` | `Event.Environment` | `EnvironmentProduction`, `EnvironmentStaging`, `EnvironmentDevelopment` |
+| `RiskPlatform` | `Event.Platform`, `EventRiskReport.Platform` | `RiskPlatformWeb`, `RiskPlatformIOS`, `RiskPlatformAndroid` |
+| `RiskSource` | `EventRiskReport.Source` | `RiskSourceKey`, `RiskSourceOrganization`, `RiskSourceDefault` |
+| `VerifyReason` | `VerifyResult.Reason` | `VerifyReasonOK` (`""`), `VerifyNotFound`, `VerifyTooOld`, `VerifyTagMismatch`, `VerifyUnidentifiable`, `VerifyUnscored`, `VerifyAlreadyConsumed` |
+| `WebhookEventType` | `WebhookEvent.Type` | `WebhookIdentificationCompleted`, `WebhookIdentificationRefused`, `WebhookVisitorSuspect`, `WebhookBillingStatusChanged`, `WebhookUsageDailySettled`, `WebhookTest` |
+| `WebhookEnvironment` | `WebhookEvent.Environment` | `WebhookEnvironmentLive`, `WebhookEnvironmentTest` |
+
+A value the server adds after this release still decodes, as a value no constant names. A `string` variable needs a conversion to compare, such as `fingerly.Signal(name)`.
+
+A native `Attestation` also carries `AttestSkipped` (the app's reason for sending no proof) and `Downgrade` (the report named an install an attested device owns).
 
 ## Verify a backend action
 
@@ -169,7 +190,7 @@ Verify the event with a server-only key, then apply your own policy to the serve
 5. `VerifyUnscored` (`"unscored"`): the event has no suspect score.
 6. `VerifyAlreadyConsumed` (`"already_consumed"`): every check above passed, but the event was already consumed.
 
-Only when every other check passes does `Verify` consume the event, last, so one event backs one decision and a replayed request id fails. Set `SkipConsume: true` to check without consuming. When everything passes, `OK` is true and `Reason` is `""`. A negative `MaxAgeSeconds` or an empty `Tag` returns `ErrInvalidVerifyOptions` before any request.
+Only when every other check passes does `Verify` consume the event, last, so one event backs one decision and a replayed request id fails. Set `SkipConsume: true` to check without consuming. When everything passes, `OK` is true and `Reason` is `VerifyReasonOK` (`""`). A negative `MaxAgeSeconds` or an empty `Tag` returns `ErrInvalidVerifyOptions` before any request.
 
 A failed check is a result, not an error. Every other failure is returned unchanged as the error, including `ErrEventPending`, which is not a verdict. `Verify` never looks at the score's value, the level or the triggers: that policy stays with you.
 
@@ -222,7 +243,7 @@ func checkout(w http.ResponseWriter, r *http.Request) {
 	// score policy is yours: result.Event.SuspectLevel, Score(), triggers and
 	// ParseDocument().
 	event := result.Event
-	if event.SuspectLevel == "high" {
+	if event.SuspectLevel == fingerly.SuspectLevelHigh {
 		http.Error(w, "checkout refused", http.StatusForbidden)
 		return
 	}
@@ -232,8 +253,10 @@ func checkout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if doc, err := event.ParseDocument(); err == nil && doc != nil && doc.Attestation != nil {
-		_ = doc.Attestation.State // "attested", "not_attested", or "failed"
+	if doc, err := event.ParseDocument(); err == nil && doc != nil && doc.Attestation != nil &&
+		doc.Attestation.State == fingerly.AttestationStateFailed {
+		http.Error(w, "attestation failed", http.StatusForbidden)
+		return
 	}
 	_, _ = w.Write([]byte("ok"))
 }
@@ -293,7 +316,7 @@ The example under [Getting started](#getting-started) calls `fingerly.VerifyWebh
 
 Verify the exact raw bytes before decoding them. Signatures cover the timestamp and body. The default replay tolerance is five minutes; persist processed `WebhookEvent.ID` values to deduplicate deliveries. During signing-secret rotation, any matching signature among the first 32 in the comma-separated header is accepted. Malformed or missing input is a false result, never a panic.
 
-`WebhookEvent` decodes the envelope every delivery shares and leaves `Data` raw, so a new event type needs no SDK upgrade. The `identification.completed` and `visitor.suspect` payloads carry `data.project_id`, the project the event belongs to; `identification.refused` carries it only when the refused request named a known key.
+`WebhookEvent` decodes the envelope every delivery shares and leaves `Data` raw, so a new event type needs no SDK upgrade. Switch on `Type` with the `WebhookEventType` constants, such as `fingerly.WebhookIdentificationCompleted`. The `identification.completed` and `visitor.suspect` payloads carry `data.project_id`, the project the event belongs to; `identification.refused` carries it only when the refused request named a known key.
 
 ## First-party proxy
 
@@ -375,7 +398,7 @@ Every forwarded request goes with its raw body bytes untouched (never JSON re-en
 | Any other upstream failure: refused, reset, DNS, a truncated or malformed answer, an answer over 4 MiB | `502` |
 | `ClientIP` returns no valid address | `500` with "The client IP callback returned no valid address" |
 
-The caller must present a public key from the same environment as the proxy key, or the request gets `401`. Incoming headers follow the sanitize-and-restore sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). A request carries one channel upstream: with an `Origin` it goes as a browser request (`X-Fingerly-Origin`) and the platform header is not forwarded; without one, the validated platform is. When both `Origin` and a validated `X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400` (`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`, `Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified proxy metadata (`X-Fingerly-Host` included), only `Content-Type`, `X-Api-Key`, `User-Agent`, `Idempotency-Key`, `Sec-Fetch-*` and `Sec-CH-UA-*` are forwarded. The proxy reports itself upstream as `go/0.3.0`, which the dashboard shows per proxy.
+The caller must present a public key from the same environment as the proxy key, or the request gets `401`. Incoming headers follow the sanitize-and-restore sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). A request carries one channel upstream: with an `Origin` it goes as a browser request (`X-Fingerly-Origin`) and the platform header is not forwarded; without one, the validated platform is. When both `Origin` and a validated `X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400` (`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`, `Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified proxy metadata (`X-Fingerly-Host` included), only `Content-Type`, `X-Api-Key`, `User-Agent`, `Idempotency-Key`, `Sec-Fetch-*` and `Sec-CH-UA-*` are forwarded. The proxy reports itself upstream as `go/0.4.0`, which the dashboard shows per proxy.
 
 One deadline, `Timeout` (5 seconds by default), covers the whole upstream exchange, body included, so a trickling answer cannot stretch it. When it passes the browser gets `504`; any other upstream failure (refused, reset, DNS, a truncated or malformed answer, an answer over 4 MiB) gets `502`. Both carry a short `text/plain` body and `Cache-Control: no-store`. The answer is read in full before anything is written, so a broken upstream never reaches the browser as a `200`. A visitor who disconnects cancels the upstream call, except under fiber, whose adaptor has no disconnect signal, so the call runs to `Timeout`.
 

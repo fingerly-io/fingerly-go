@@ -32,7 +32,7 @@ func ExampleEventsService_List() {
 	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
 
 	page, err := client.Events.List(context.Background(), &fingerly.EventListParams{
-		Level: "high",
+		Level: fingerly.SuspectLevelHigh,
 		Limit: 50,
 		From:  time.Now().Add(-24 * time.Hour),
 	})
@@ -70,9 +70,9 @@ func ExampleAPIError() {
 			return "challenge", nil
 		}
 		switch event.SuspectLevel {
-		case "high":
+		case fingerly.SuspectLevelHigh:
 			return "review", nil
-		case "medium":
+		case fingerly.SuspectLevelMedium:
 			return "challenge", nil
 		}
 		return "allow", nil
@@ -130,7 +130,7 @@ func ExampleEventsService_Verify() {
 		log.Fatal(err)
 	case !result.OK:
 		fmt.Println("refused:", result.Reason)
-	case result.Event.SuspectLevel == "high":
+	case result.Event.SuspectLevel == fingerly.SuspectLevelHigh:
 		fmt.Println("refused: high risk")
 	default:
 		fmt.Println("allowed")

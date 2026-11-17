@@ -243,7 +243,7 @@ func TestV3OpenAPIAndModels(t *testing.T) {
 		t.Error("v3 AttestEnvelope schema missing from openapi.json")
 	}
 
-	v3Signals := []string{
+	v3Signals := []Signal{
 		SignalAttestationFailed,
 		SignalAttestationDowngrade,
 		SignalDeviceInconsistent,
@@ -315,14 +315,14 @@ func TestV3OpenAPIAndModels(t *testing.T) {
 }
 
 func TestV3AntiSpoofingSignalsAndAttestationDiagnostics(t *testing.T) {
-	for constant, wire := range map[string]string{
+	for constant, wire := range map[Signal]string{
 		SignalAttestationDowngrade: "attestation_downgrade",
 		SignalProbeErrors:          "probe_errors",
 		SignalFetchMetadataMissing: "fetch_metadata_missing",
 		SignalWebTicketMissing:     "web_ticket_missing",
 		SignalWebTicketInvalid:     "web_ticket_invalid",
 	} {
-		if constant != wire {
+		if string(constant) != wire {
 			t.Errorf("signal constant = %q, want %q", constant, wire)
 		}
 	}
