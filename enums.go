@@ -145,13 +145,33 @@ const (
 type AttestSkippedReason string
 
 const (
-	AttestSkippedNotOffered           AttestSkippedReason = "not_offered"
-	AttestSkippedUnsupported          AttestSkippedReason = "unsupported"
+	// AttestSkippedNotOffered means the challenge offered no attestation: on iOS
+	// the SDK key has no Apple app ID for App Attest, on Android the app's
+	// transport returned no challenge offer.
+	AttestSkippedNotOffered AttestSkippedReason = "not_offered"
+	// AttestSkippedUnsupported means the device cannot make an attested key: App
+	// Attest is not supported on the iOS device, or Android is older than 7.0
+	// (API 24).
+	AttestSkippedUnsupported AttestSkippedReason = "unsupported"
+	// AttestSkippedChallengeUnavailable means there was no usable challenge
+	// ticket: the challenge request failed, or on Android the ticket it
+	// returned was malformed.
 	AttestSkippedChallengeUnavailable AttestSkippedReason = "challenge_unavailable"
-	AttestSkippedKeyError             AttestSkippedReason = "key_error"
-	AttestSkippedTimeout              AttestSkippedReason = "timeout"
-	AttestSkippedBackoff              AttestSkippedReason = "backoff"
-	AttestSkippedInstallUnavailable   AttestSkippedReason = "install_unavailable"
+	// AttestSkippedKeyError means the platform key store failed to create, attest
+	// or sign with the key, or on Android the stored key record could not be
+	// read.
+	AttestSkippedKeyError AttestSkippedReason = "key_error"
+	// AttestSkippedTimeout means attestation did not finish in time: a key store
+	// call ran past its budget, or another identification held the
+	// attestation step too long.
+	AttestSkippedTimeout AttestSkippedReason = "timeout"
+	// AttestSkippedBackoff means the server rejected a new key from this install
+	// (on iOS, also when it asked for a replacement), and the SDK is waiting
+	// out a backoff before it registers another.
+	AttestSkippedBackoff AttestSkippedReason = "backoff"
+	// AttestSkippedInstallUnavailable means the report has no usable install ID,
+	// or on iOS the stored key record could not be read or saved.
+	AttestSkippedInstallUnavailable AttestSkippedReason = "install_unavailable"
 )
 
 // EventState says whether an event was enriched.
