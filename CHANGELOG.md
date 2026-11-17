@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Added named string types with a constant per value for every closed set the
   API reports: `Signal` (every signal group and raw detector, including the
