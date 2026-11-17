@@ -20,6 +20,8 @@ type VerifyReason string
 
 // The reasons Verify reports, in the order it checks them.
 const (
+	// VerifyReasonOK: every check passed. It is the zero value.
+	VerifyReasonOK VerifyReason = ""
 	// VerifyNotFound: the event does not exist, or was gone when consumed.
 	// VerifyResult.Event is nil.
 	VerifyNotFound VerifyReason = "not_found"

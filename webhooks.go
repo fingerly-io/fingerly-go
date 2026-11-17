@@ -38,14 +38,15 @@ type WebhookEvent struct {
 	// ID identifies this delivery. Persist it to deduplicate: a webhook may
 	// arrive more than once.
 	ID string `json:"id"`
-	// Type is the event name, such as "identification.completed".
-	Type string `json:"type"`
+	// Type is the event name, such as WebhookIdentificationCompleted.
+	Type WebhookEventType `json:"type"`
 	// Version is the envelope version.
 	Version int `json:"version"`
 	// OrganizationID is the organization the event belongs to.
 	OrganizationID string `json:"organization_id"`
-	// Environment is the deployment the event came from.
-	Environment string `json:"environment"`
+	// Environment is WebhookEnvironmentLive for production keys and
+	// WebhookEnvironmentTest for every other environment.
+	Environment WebhookEnvironment `json:"environment"`
 	// CreatedAt is when Fingerly recorded the event.
 	CreatedAt time.Time `json:"created_at"`
 	// Data is the event-specific payload.

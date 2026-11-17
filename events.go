@@ -91,7 +91,7 @@ func (p *EventListParams) query() string {
 		values.Set("visitor", p.Visitor)
 	}
 	if p.Level != "" {
-		values.Set("level", p.Level)
+		values.Set("level", string(p.Level))
 	}
 	if len(values) == 0 {
 		return ""
