@@ -3,6 +3,7 @@ package fingerly
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -42,13 +44,52 @@ var relayedHeaders = []string{
 	"Retry-After",
 }
 
+// clientMetadataHeaders are browser fetch-metadata and client-hint headers
+// forwarded verbatim when present on the incoming request.
+var clientMetadataHeaders = []string{
+	"Sec-Fetch-Site",
+	"Sec-Fetch-Mode",
+	"Sec-Fetch-Dest",
+	"Sec-CH-UA",
+	"Sec-CH-UA-Mobile",
+	"Sec-CH-UA-Platform",
+}
+
+const (
+	corsAllowHeaders  = "content-type, x-api-key, idempotency-key, x-fingerly-sdk-platform"
+	corsExposeHeaders = "x-request-id, ratelimit-limit, ratelimit-remaining, retry-after"
+	missingOriginBody = `{"error":{"code":"missing_origin","message":"Origin header is required","status":400}}`
+)
+
+// validSDKPlatform returns the validated native or bridge platform identifier
+// when incoming X-Fingerly-SDK-Platform contains a single exact lowercase match.
+func validSDKPlatform(values []string) string {
+	if len(values) != 1 {
+		return ""
+	}
+	switch values[0] {
+	case "ios",
+		"android",
+		"react-native",
+		"react-native-ios",
+		"react-native-android",
+		"flutter",
+		"flutter-ios",
+		"flutter-android",
+		"lynx-ios",
+		"lynx-android",
+		"capacitor",
+		"kotlin-multiplatform":
+		return values[0]
+	default:
+		return ""
+	}
+}
+
 // ProxyOptions configures a Proxy. ProxyKey and ClientIP are required.
 type ProxyOptions struct {
 	// ProxyKey is a write-only credential, fly_px_…, held only on your server.
 	ProxyKey string
-	// SecretKey is the deprecated alternative to ProxyKey. Secret read keys
-	// will be refused in the next major version; do not pass both.
-	SecretKey string
 
 	// ClientIP resolves the visitor's address, which must be exactly one IPv4
 	// or IPv6 literal. Read it from a header your own infrastructure sets,
@@ -65,12 +106,21 @@ type ProxyOptions struct {
 	Path string
 	// APIVersion selects the upstream ingest URL. Defaults to "v1".
 	APIVersion string
-	// Upstream overrides the API origin implied by the key.
+	// Upstream overrides the API origin. It must be a bare https:// origin:
+	// scheme, host and optional port, with no path, query, fragment,
+	// credentials, space or control byte.
 	Upstream string
+	// AllowInsecureLoopback accepts a plain http:// Upstream on 127.0.0.1,
+	// localhost or [::1], for a local test harness only. Any other http://
+	// host is refused whatever this is set to.
+	AllowInsecureLoopback bool
 	// MaxBodyBytes refuses larger request bodies with 413. Defaults to 1 MiB.
 	MaxBodyBytes int64
 	// Timeout bounds the upstream call. Defaults to 5 seconds.
 	Timeout time.Duration
+	// AllowedOrigins lists origins permitted to make cross-origin browser
+	// requests to this proxy. Leave empty for same-origin routes.
+	AllowedOrigins []string
 	// OnError is called once for every request the proxy answered with a 5xx
 	// of its own: 504 when the upstream deadline passed, 502 for any other
 	// upstream failure, 500 for a ClientIP that returned no valid address.
@@ -103,15 +153,15 @@ type ProxyOptions struct {
 // from a browser. Customer cookies and authorization headers are never passed
 // on, and nothing relayed back names Fingerly.
 type Proxy struct {
-	key          string
-	scope        keyScope
-	usesProxyKey bool
-	upstreamURL  string
-	path         string
-	maxBodyBytes int64
-	clientIP     func(*http.Request) string
-	httpClient   *http.Client
-	onError      func(*http.Request, *ProxyError)
+	key            string
+	scope          keyScope
+	upstreamURL    string
+	path           string
+	maxBodyBytes   int64
+	allowedOrigins map[string]struct{}
+	clientIP       func(*http.Request) string
+	httpClient     *http.Client
+	onError        func(*http.Request, *ProxyError)
 	// badClientIP reports an invalid ClientIP once, not once per request. A
 	// pointer so that Proxy has no lock to copy and Format can take a value.
 	badClientIP *sync.Once
@@ -126,7 +176,9 @@ var errNoClientIP = errors.New("the client IP callback returned no valid address
 type ProxyError struct {
 	// Status is what the browser was answered: 502, 504 or 500.
 	Status int
-	// Err is the underlying cause.
+	// Err is the kind of failure: a timeout, an unreachable upstream, a TLS
+	// failure, an unrelayable status or answer. It never names the upstream
+	// host, port or URL.
 	Err error
 }
 
@@ -143,30 +195,22 @@ func (e *ProxyError) Unwrap() error { return e.Err }
 // Unlike New, this reports configuration errors immediately: a proxy is wired
 // up once at start-up, where an error is natural to handle.
 func NewProxy(options ProxyOptions) (*Proxy, error) {
-	if options.ProxyKey == "" && options.SecretKey == "" {
+	if options.ProxyKey == "" {
 		return nil, errors.New("fingerly: a Fingerly proxy key is required")
-	}
-	if options.ProxyKey != "" && options.SecretKey != "" {
-		return nil, errors.New("fingerly: pass ProxyKey or deprecated SecretKey, not both")
 	}
 	if options.ClientIP == nil {
 		return nil, errors.New("fingerly: ClientIP is required")
 	}
 
 	proxy := &Proxy{
-		usesProxyKey: options.ProxyKey != "",
 		clientIP:     options.ClientIP,
 		maxBodyBytes: defaultMaxBodyBytes,
 		onError:      options.OnError,
 		badClientIP:  &sync.Once{},
 	}
 	proxy.key = options.ProxyKey
-	kind := keyProxy
-	if !proxy.usesProxyKey {
-		proxy.key, kind = options.SecretKey, keySecret
-	}
 
-	scope, err := parseKey(proxy.key, kind)
+	scope, err := parseKey(proxy.key, keyProxy)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +220,7 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	if upstream == "" {
 		upstream = defaultEndpoint
 	}
-	origin, err := normalizeOrigin(upstream)
+	origin, err := normalizeUpstream(upstream, options.AllowInsecureLoopback)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +245,14 @@ func NewProxy(options ProxyOptions) (*Proxy, error) {
 	}
 	if options.MaxBodyBytes > 0 {
 		proxy.maxBodyBytes = options.MaxBodyBytes
+	}
+
+	if len(options.AllowedOrigins) > 0 {
+		allowed, err := parseAllowedOrigins(options.AllowedOrigins)
+		if err != nil {
+			return nil, err
+		}
+		proxy.allowedOrigins = allowed
 	}
 
 	timeout := options.Timeout
@@ -231,8 +283,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound)
 		return
 	}
+
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	cors := p.matchedOrigin(origin)
+	if cors != "" {
+		applyCORS(w.Header(), cors)
+	}
+	if r.Method == http.MethodOptions && cors != "" {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+		if len(p.allowedOrigins) > 0 {
+			w.Header().Set("Allow", "POST, OPTIONS")
+		} else {
+			w.Header().Set("Allow", http.MethodPost)
+		}
 		refuse(w, http.StatusMethodNotAllowed)
 		return
 	}
@@ -240,6 +308,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	apiKey, ok := p.upstreamKeyFor(r.Header.Get("X-API-Key"))
 	if !ok {
 		refuse(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Sanitize-and-restore Step 1-4: capture validated X-Fingerly-SDK-Platform
+	// before stripping incoming X-Fingerly-* headers, and reject with 400
+	// missing_origin iff both Origin and validated platform are empty.
+	sdkPlatform := validSDKPlatform(r.Header.Values("X-Fingerly-SDK-Platform"))
+	if origin == "" && sdkPlatform == "" {
+		refuseJSON(w, http.StatusBadRequest, missingOriginBody)
 		return
 	}
 
@@ -275,7 +352,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError)
 		return
 	}
-	p.setUpstreamHeaders(request, r, apiKey, clientIP)
+	p.setUpstreamHeaders(request, r, apiKey, clientIP, origin, sdkPlatform)
 
 	response, err := p.httpClient.Do(request)
 	if err != nil {
@@ -283,10 +360,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// http.Transport accepts any three digits as a status, and WriteHeader
-	// panics on a code under 100. Nothing outside 2xx to 5xx is an answer.
-	if response.StatusCode < 200 || response.StatusCode > 599 {
+	// panics on a code under 100. Nothing outside 2xx to 5xx is an answer, and
+	// the API never redirects: a 3xx is a wrong or tampered upstream.
+	if response.StatusCode < 200 || response.StatusCode > 599 ||
+		(response.StatusCode >= 300 && response.StatusCode < 400) {
 		_ = response.Body.Close()
-		p.fail(w, r, fmt.Errorf("upstream answered status %d", response.StatusCode))
+		p.fail(w, r, errUpstreamStatus)
 		return
 	}
 	upstreamBody, err := readUpstream(response)
@@ -310,8 +389,44 @@ func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if isTimeout(err) {
 		status = http.StatusGatewayTimeout
 	}
-	p.report(r, &ProxyError{Status: status, Err: err})
+	p.report(r, &ProxyError{Status: status, Err: failureKind(err)})
 	refuse(w, status)
+}
+
+// Upstream failure kinds. A transport error names the upstream URL, host and
+// port, so what is reported is the kind of failure only.
+var (
+	errUpstreamTimeout     = fmt.Errorf("upstream timed out: %w", context.DeadlineExceeded)
+	errUpstreamUnreachable = errors.New("upstream unreachable")
+	errUpstreamTLS         = errors.New("upstream TLS handshake failed")
+	errUpstreamStatus      = errors.New("upstream answered an unrelayable status")
+	errUpstreamUnreadable  = errors.New("upstream answer unreadable")
+)
+
+// failureKind maps an upstream failure to one of the kinds above.
+func failureKind(err error) error {
+	switch {
+	case errors.Is(err, errUpstreamTooLarge), errors.Is(err, errUpstreamStatus),
+		errors.Is(err, errUpstreamTimeout):
+		return err
+	case isTimeout(err):
+		return errUpstreamTimeout
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		// Not a transport error: the body broke while it was read.
+		return errUpstreamUnreadable
+	}
+	var tlsRecord tls.RecordHeaderError
+	var tlsVerify *tls.CertificateVerificationError
+	var opErr *net.OpError
+	switch {
+	case errors.As(err, &tlsRecord), errors.As(err, &tlsVerify):
+		return errUpstreamTLS
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return errUpstreamUnreachable
+	}
+	return errUpstreamUnreadable
 }
 
 // report hands a failure to OnError, or logs one line about it.
@@ -354,12 +469,8 @@ func readUpstream(response *http.Response) ([]byte, error) {
 // upstreamKeyFor decides which key to present upstream.
 //
 // With a proxy key the browser must supply a public key for the same
-// environment, which the proxy forwards alongside its own. The deprecated
-// secret-key mode authenticates on its own.
+// environment, which the proxy forwards alongside its own.
 func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
-	if !p.usesProxyKey {
-		return p.key, true
-	}
 	browser, err := parseKey(presented, keyPublic)
 	if err != nil {
 		return "", false
@@ -370,11 +481,12 @@ func (p *Proxy) upstreamKeyFor(presented string) (string, bool) {
 	return presented, true
 }
 
-// setUpstreamHeaders builds the headers for the forwarded request.
-//
-// Nothing is copied wholesale: only the body's content type, the visitor
-// metadata Fingerly needs, and an idempotency key when the SDK sent one.
-func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey, clientIP string) {
+// setUpstreamHeaders builds the headers for the forwarded request from scratch
+// so incoming X-Fingerly-*, Cookie, and Authorization headers never pass on.
+func (p *Proxy) setUpstreamHeaders(
+	request, incoming *http.Request,
+	apiKey, clientIP, origin, sdkPlatform string,
+) {
 	contentType := incoming.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
@@ -382,16 +494,67 @@ func (p *Proxy) setUpstreamHeaders(request, incoming *http.Request, apiKey, clie
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("X-API-Key", apiKey)
 	request.Header.Set("X-Fingerly-Client-IP", clientIP)
-	request.Header.Set("X-Fingerly-Origin", incoming.Header.Get("Origin"))
 	request.Header.Set("X-Fingerly-User-Agent", incoming.Header.Get("User-Agent"))
 	request.Header.Set("X-Fingerly-Proxy-Version", proxyVersion)
 	request.Header.Set("User-Agent", userAgent)
-	if p.usesProxyKey {
-		request.Header.Set("X-Fingerly-Proxy-Key", p.key)
+	request.Header.Set("X-Fingerly-Proxy-Key", p.key)
+	// One channel only: the API refuses a proxied request that names both, and
+	// a non-empty origin is the browser channel, which is what the API picks
+	// for the same request sent directly.
+	if origin != "" {
+		request.Header.Set("X-Fingerly-Origin", origin)
+	} else if sdkPlatform != "" {
+		request.Header.Set("X-Fingerly-SDK-Platform", sdkPlatform)
+	}
+	host := strings.TrimSpace(incoming.Host)
+	if host == "" {
+		host = strings.TrimSpace(incoming.Header.Get("Host"))
+	}
+	if host != "" {
+		request.Header.Set("X-Fingerly-Host", host)
 	}
 	if idempotency := incoming.Header.Get("Idempotency-Key"); idempotency != "" {
 		request.Header.Set("Idempotency-Key", idempotency)
 	}
+	for _, name := range clientMetadataHeaders {
+		if value := incoming.Header.Get(name); value != "" {
+			request.Header.Set(name, value)
+		}
+	}
+}
+
+func (p *Proxy) matchedOrigin(origin string) string {
+	if origin == "" || len(p.allowedOrigins) == 0 {
+		return ""
+	}
+	if _, ok := p.allowedOrigins[origin]; ok {
+		return origin
+	}
+	return ""
+}
+
+func parseAllowedOrigins(origins []string) (map[string]struct{}, error) {
+	out := make(map[string]struct{}, len(origins))
+	for _, raw := range origins {
+		normalized, err := normalizeOrigin(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("fingerly: invalid AllowedOrigins entry: %w", err)
+		}
+		parsed, err := url.Parse(normalized)
+		if err != nil || parsed.Path != "" {
+			return nil, errors.New("fingerly: AllowedOrigins entries must be bare HTTP(S) origins")
+		}
+		out[normalized] = struct{}{}
+	}
+	return out, nil
+}
+
+func applyCORS(header http.Header, origin string) {
+	header.Set("Access-Control-Allow-Origin", origin)
+	header.Set("Vary", "Origin")
+	header.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	header.Set("Access-Control-Allow-Headers", corsAllowHeaders)
+	header.Set("Access-Control-Expose-Headers", corsExposeHeaders)
 }
 
 // visitorIP runs the ClientIP callback and accepts exactly one IPv4 or IPv6
@@ -471,4 +634,12 @@ func refuseWith(w http.ResponseWriter, status int, text string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, text)
+}
+
+// refuseJSON writes status and a structured JSON error body, uncacheable.
+func refuseJSON(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
 }

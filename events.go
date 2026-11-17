@@ -25,14 +25,10 @@ type EventsService struct {
 // An empty request id, "." or ".." returns ErrInvalidRequestID without
 // sending anything.
 func (s *EventsService) Get(ctx context.Context, requestID string) (*Event, error) {
-	// URL parsers resolve a dot segment even when it is percent-encoded, so
-	// escaping cannot keep these in the path: "" and "." would name the list
-	// route, and ".." a route above it, with the secret key attached.
-	switch requestID {
-	case "", ".", "..":
+	if !validRequestID(requestID) {
 		return nil, ErrInvalidRequestID
 	}
-	body, err := s.client.get(ctx, "/events/"+url.PathEscape(requestID))
+	body, err := s.client.get(ctx, eventPath(requestID))
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +38,18 @@ func (s *EventsService) Get(ctx context.Context, requestID string) (*Event, erro
 	}
 	event.Raw = body
 	return &event, nil
+}
+
+// validRequestID reports whether a request id can name one event in a path.
+// URL parsers resolve a dot segment even when it is percent-encoded, so
+// escaping cannot keep these in the path: "" and "." would name the list
+// route, and ".." a route above it, with the secret key attached.
+func validRequestID(requestID string) bool {
+	switch requestID {
+	case "", ".", "..":
+		return false
+	}
+	return true
 }
 
 // List returns events within the retention window, newest first.

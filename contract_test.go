@@ -219,6 +219,146 @@ func TestVerifiesEveryWebhookFixture(t *testing.T) {
 	}
 }
 
+func TestV3OpenAPIAndModels(t *testing.T) {
+	rawSpec, err := os.ReadFile(filepath.Join(contractDir, "openapi.json"))
+	if err != nil {
+		t.Fatalf("read openapi: %v", err)
+	}
+	var spec struct {
+		Paths      map[string]any `json:"paths"`
+		Components struct {
+			Schemas map[string]any `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rawSpec, &spec); err != nil {
+		t.Fatalf("decode openapi: %v", err)
+	}
+	if _, exists := spec.Paths["/api/v1/events/{request_id}/supplement"]; exists {
+		t.Error("retired supplement path still present in openapi.json")
+	}
+	if _, exists := spec.Components.Schemas["SupplementOut"]; exists {
+		t.Error("retired SupplementOut schema still present in openapi.json")
+	}
+	if _, exists := spec.Components.Schemas["AttestEnvelope"]; !exists {
+		t.Error("v3 AttestEnvelope schema missing from openapi.json")
+	}
+
+	v3Signals := []string{
+		SignalAttestationFailed,
+		SignalAttestationDowngrade,
+		SignalDeviceInconsistent,
+		SignalReportIncomplete,
+		SignalProbeErrors,
+		SignalFetchMetadataMissing,
+		SignalWebTicketMissing,
+		SignalWebTicketInvalid,
+		SignalTampering,
+		SignalCustomRootCA,
+		SignalSecondaryUserProfile,
+	}
+	triggers := make([]map[string]any, 0, len(v3Signals))
+	for _, sig := range v3Signals {
+		triggers = append(triggers, map[string]any{
+			"signal": sig, "weight": 4, "confidence": "high",
+		})
+	}
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(map[string]any{
+		"visitor_id":    "",
+		"state":         "unavailable",
+		"reason":        "ip_lookup_failed",
+		"suspect_score": nil,
+		"triggers":      triggers,
+		"has_document":  true,
+		"document": map[string]any{
+			"schema":      1,
+			"request_id":  testRequestID,
+			"occurred_at": "2026-09-17T12:00:00Z",
+			"sdk":         map[string]any{"platform": "ios", "version": "0.3.0"},
+			"ip_network":  "203.0.113.0/24",
+			"attestation": map[string]any{
+				"state":              AttestationStateAttested,
+				"platform":           "ios",
+				"status":             AttestationStatusVerified,
+				"revocation_checked": false,
+				"package_bound":      true,
+				"signer_bound":       true,
+				"device_check":       "held",
+			},
+		},
+	})))
+
+	event, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.VisitorID != "" || event.Identifiable() {
+		t.Errorf("unidentifiable event decoded VisitorID=%q Identifiable=%v", event.VisitorID, event.Identifiable())
+	}
+	if event.Reason != "ip_lookup_failed" {
+		t.Errorf("Reason = %q, want ip_lookup_failed", event.Reason)
+	}
+	if len(event.Triggers) != len(v3Signals) {
+		t.Fatalf("decoded %d triggers, want %d", len(event.Triggers), len(v3Signals))
+	}
+	for i, want := range v3Signals {
+		if event.Triggers[i].Signal != want {
+			t.Errorf("trigger %d signal = %q, want %q", i, event.Triggers[i].Signal, want)
+		}
+	}
+	doc, err := event.ParseDocument()
+	if err != nil || doc == nil {
+		t.Fatalf("ParseDocument: doc=%v err=%v", doc, err)
+	}
+	if doc.Attestation == nil || doc.Attestation.Status != AttestationStatusVerified || doc.Attestation.DeviceCheck != "held" {
+		t.Errorf("unexpected attestation: %+v", doc.Attestation)
+	}
+}
+
+func TestV3AntiSpoofingSignalsAndAttestationDiagnostics(t *testing.T) {
+	for constant, wire := range map[string]string{
+		SignalAttestationDowngrade: "attestation_downgrade",
+		SignalProbeErrors:          "probe_errors",
+		SignalFetchMetadataMissing: "fetch_metadata_missing",
+		SignalWebTicketMissing:     "web_ticket_missing",
+		SignalWebTicketInvalid:     "web_ticket_invalid",
+	} {
+		if constant != wire {
+			t.Errorf("signal constant = %q, want %q", constant, wire)
+		}
+	}
+
+	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(map[string]any{
+		"visitor_id":   "",
+		"has_document": true,
+		"document": map[string]any{
+			"schema":      1,
+			"request_id":  testRequestID,
+			"occurred_at": "2026-09-17T12:00:00Z",
+			"sdk":         map[string]any{"platform": "ios", "version": "0.3.0"},
+			"attestation": map[string]any{
+				"state":          AttestationStateNotAttested,
+				"platform":       "ios",
+				"status":         AttestationStatusAbsent,
+				"attest_skipped": "timeout",
+				"downgrade":      true,
+			},
+		},
+	})))
+
+	event, err := testClient(rec).Events.Get(context.Background(), testRequestID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	doc, err := event.ParseDocument()
+	if err != nil || doc == nil || doc.Attestation == nil {
+		t.Fatalf("ParseDocument: doc=%v err=%v", doc, err)
+	}
+	if doc.Attestation.AttestSkipped != "timeout" || !doc.Attestation.Downgrade {
+		t.Errorf("attest_skipped=%q downgrade=%v, want timeout and true",
+			doc.Attestation.AttestSkipped, doc.Attestation.Downgrade)
+	}
+}
+
 // parseUnix reads a fixture's signing timestamp, so each one is verified at
 // the instant it was signed.
 func parseUnix(t *testing.T, timestamp string) int64 {

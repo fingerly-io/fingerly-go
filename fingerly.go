@@ -17,7 +17,7 @@ import (
 )
 
 // Version is the SDK version, reported to the API on every request.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 const (
 	defaultTimeout    = 10 * time.Second
@@ -31,6 +31,9 @@ const (
 type Client struct {
 	// Events reads stored events under this client's secret key.
 	Events *EventsService
+	// DeviceCheck spends an iOS event's held DeviceCheck token to read or
+	// write the device's two bits.
+	DeviceCheck *DeviceCheckService
 
 	secretKey  string
 	baseURL    string
@@ -50,12 +53,23 @@ type clientConfig struct {
 	apiVersion string
 	timeout    time.Duration
 	httpClient *http.Client
+
+	allowInsecureLoopback bool
 }
 
 // WithEndpoint overrides the default API origin, for a local or self-hosted
-// API. The key still decides which kind of key is accepted.
+// API. It must be a bare https:// origin: scheme, host and optional port, with
+// no path, query, fragment, credentials, space or control byte. The key still
+// decides which kind of key is accepted.
 func WithEndpoint(endpoint string) Option {
 	return func(c *clientConfig) { c.endpoint = endpoint }
+}
+
+// WithAllowInsecureLoopback accepts a plain http:// endpoint on 127.0.0.1,
+// localhost or [::1], for a local test harness only. Any other http:// host is
+// refused with or without it.
+func WithAllowInsecureLoopback() Option {
+	return func(c *clientConfig) { c.allowInsecureLoopback = true }
 }
 
 // WithAPIVersion selects a route version, such as "v2". The default is "v1",
@@ -96,6 +110,7 @@ func New(secretKey string, opts ...Option) *Client {
 
 	client := &Client{secretKey: secretKey}
 	client.Events = &EventsService{client: client}
+	client.DeviceCheck = &DeviceCheckService{client: client}
 
 	// Validate the key even when an endpoint is given, so a public, proxy or
 	// management key can never reach an API that would accept it.
@@ -107,7 +122,7 @@ func New(secretKey string, opts ...Option) *Client {
 	if origin == "" {
 		origin = defaultEndpoint
 	}
-	origin, err := normalizeOrigin(origin)
+	origin, err := normalizeEndpoint(origin, config.allowInsecureLoopback)
 	if err != nil {
 		client.configErr = err
 		return client

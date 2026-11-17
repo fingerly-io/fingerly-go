@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+- Added `Events.Verify(ctx, requestID, *VerifyOptions)`, which reads an event
+  and checks it exists, is recent (`MaxAgeSeconds`, 300 by default), carries
+  the expected `Tag`, is identifiable and scored, then consumes it once
+  (`SkipConsume` to skip), reporting a `VerifyReason` in a `VerifyResult`, and
+  `Events.Consume(ctx, requestID)` with a typed `EventAlreadyConsumedError`
+  for `event_already_consumed`, matching `ErrEventAlreadyConsumed`.
+- Added `Client.DeviceCheck` with `Query` and `Write`, which spend an iOS
+  event's held DeviceCheck token to read or write the device's two bits,
+  `DeviceCheckBits`, `DeviceCheckWrite`, `DeviceCheckWriteResult`, `Bool`,
+  `APIError.AppleStatus`, and a sentinel per DeviceCheck error code. A `503`
+  or a transport failure is retried with the identical request.
+- Refreshed the vendored v3 OpenAPI and contract fixtures, removing retired
+  deferred supplement schemas and routes, and added `Event.Reason`,
+  `Event.Identifiable()`, `Event.ParseDocument()`, `EventDocument`,
+  `Attestation` (with `AttestSkipped` and `Downgrade`), and v3 signal
+  constants (`SignalAttestationFailed`, `SignalAttestationDowngrade`,
+  `SignalDeviceInconsistent`, `SignalReportIncomplete`, `SignalProbeErrors`,
+  `SignalFetchMetadataMissing`, `SignalWebTicketMissing`,
+  `SignalWebTicketInvalid`, `SignalTampering`, `SignalCustomRootCA`,
+  `SignalSecondaryUserProfile`).
+- Updated `Proxy` to enforce the single-path `proxy.md` relay contract:
+  sanitize-and-restore validation of `X-Fingerly-SDK-Platform`, rejection with
+  HTTP `400` (`missing_origin`) when both `Origin` and a valid
+  `X-Fingerly-SDK-Platform` are absent (never synthesising `X-Fingerly-Origin`),
+  forwarding of `Sec-Fetch-*` and `Sec-CH-UA-*` client metadata headers,
+  optional cross-origin `AllowedOrigins` CORS handling, and verbatim raw-byte
+  forwarding.
+- `NewProxy` requires `ProxyKey` and has no secret key option: every request
+  must present a public key of the proxy key's environment or gets a `401`,
+  and a secret key is never sent upstream.
+
 ## 0.2.0
 
 - `Event.ProjectID` is the Fingerly project an event belongs to, on single

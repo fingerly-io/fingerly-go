@@ -25,8 +25,8 @@ func (p Proxy) Format(f fmt.State, _ rune) {
 // Format keeps the keys out of every fmt verb, so logging the options a proxy
 // was built with is safe.
 func (o ProxyOptions) Format(f fmt.State, _ rune) {
-	_, _ = fmt.Fprintf(f, "fingerly.ProxyOptions{ProxyKey:%s SecretKey:%s Path:%s Upstream:%s}",
-		redactIfSet(o.ProxyKey), redactIfSet(o.SecretKey), o.Path, o.Upstream)
+	_, _ = fmt.Fprintf(f, "fingerly.ProxyOptions{ProxyKey:%s Path:%s Upstream:%s}",
+		redactIfSet(o.ProxyKey), o.Path, o.Upstream)
 }
 
 // MarshalJSON keeps the keys out of JSON, and leaves out the callbacks, which
@@ -34,7 +34,6 @@ func (o ProxyOptions) Format(f fmt.State, _ rune) {
 func (o ProxyOptions) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"ProxyKey":     redactIfSet(o.ProxyKey),
-		"SecretKey":    redactIfSet(o.SecretKey),
 		"Path":         o.Path,
 		"APIVersion":   o.APIVersion,
 		"Upstream":     o.Upstream,

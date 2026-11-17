@@ -85,7 +85,7 @@ func errorBody(code string, status int) map[string]any {
 
 // testClient points a client at the recorder's server.
 func testClient(rec *recorder, opts ...Option) *Client {
-	return New(testSecretKey, append([]Option{WithEndpoint(rec.server.URL)}, opts...)...)
+	return New(testSecretKey, append([]Option{WithEndpoint(rec.server.URL), WithAllowInsecureLoopback()}, opts...)...)
 }
 
 func TestNewRejectsUnsupportedKeys(t *testing.T) {
@@ -125,7 +125,7 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 
 func TestConfigurationErrorsNeverReachTheNetwork(t *testing.T) {
 	rec := newRecorder(t, respondJSON(http.StatusOK, eventBody(nil)))
-	client := New("not-a-key", WithEndpoint(rec.server.URL))
+	client := New("not-a-key", WithEndpoint(rec.server.URL), WithAllowInsecureLoopback())
 	if _, err := client.Events.Get(context.Background(), "id"); err == nil {
 		t.Fatal("expected a configuration error")
 	}
@@ -378,7 +378,7 @@ func TestTransportFailuresAreConnectionErrors(t *testing.T) {
 	closed := httptest.NewServer(http.NotFoundHandler())
 	url := closed.URL
 	closed.Close()
-	_, err := New(testSecretKey, WithEndpoint(url)).Events.Get(context.Background(), "id")
+	_, err := New(testSecretKey, WithEndpoint(url), WithAllowInsecureLoopback()).Events.Get(context.Background(), "id")
 	var connErr *ConnectionError
 	if !errors.As(err, &connErr) || connErr.Timeout || errors.Is(err, ErrTimeout) {
 		t.Fatalf("refused connection gave %T %v", err, err)
