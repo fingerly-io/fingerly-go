@@ -19,7 +19,8 @@
   `Attestation` (with `AttestSkipped` and `Downgrade`), and v3 signal
   constants (`SignalAttestationFailed`, `SignalAttestationDowngrade`,
   `SignalDeviceInconsistent`, `SignalReportIncomplete`, `SignalProbeErrors`,
-  `SignalFetchMetadataMissing`, `SignalTampering`, `SignalCustomRootCA`,
+  `SignalFetchMetadataMissing`, `SignalWebTicketMissing`,
+  `SignalWebTicketInvalid`, `SignalTampering`, `SignalCustomRootCA`,
   `SignalSecondaryUserProfile`).
 - Updated `Proxy` to enforce the single-path `proxy.md` relay contract:
   sanitize-and-restore validation of `X-Fingerly-SDK-Platform`, rejection with

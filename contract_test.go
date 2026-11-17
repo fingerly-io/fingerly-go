@@ -250,6 +250,8 @@ func TestV3OpenAPIAndModels(t *testing.T) {
 		SignalReportIncomplete,
 		SignalProbeErrors,
 		SignalFetchMetadataMissing,
+		SignalWebTicketMissing,
+		SignalWebTicketInvalid,
 		SignalTampering,
 		SignalCustomRootCA,
 		SignalSecondaryUserProfile,
@@ -317,6 +319,8 @@ func TestV3AntiSpoofingSignalsAndAttestationDiagnostics(t *testing.T) {
 		SignalAttestationDowngrade: "attestation_downgrade",
 		SignalProbeErrors:          "probe_errors",
 		SignalFetchMetadataMissing: "fetch_metadata_missing",
+		SignalWebTicketMissing:     "web_ticket_missing",
+		SignalWebTicketInvalid:     "web_ticket_invalid",
 	} {
 		if constant != wire {
 			t.Errorf("signal constant = %q, want %q", constant, wire)

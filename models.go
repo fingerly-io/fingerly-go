@@ -32,6 +32,8 @@ const (
 	SignalRemoteControl         = "remote_control"
 	SignalBot                   = "bot"
 	SignalFetchMetadataMissing  = "fetch_metadata_missing"
+	SignalWebTicketMissing      = "web_ticket_missing"
+	SignalWebTicketInvalid      = "web_ticket_invalid"
 	SignalHighActivity          = "high_activity"
 	SignalIncognitoMode         = "incognito_mode"
 	SignalPrivacySettings       = "privacy_settings"
