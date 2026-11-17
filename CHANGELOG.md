@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Each `AttestSkippedReason` constant says when the iOS and Android SDKs send
+  it.
+- The vendored OpenAPI contract declares the enum values for the fixed string
+  fields, matching the server.
+
 ## 0.4.0
 
 - Added named string types with a constant per value for every closed set the
