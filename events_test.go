@@ -130,6 +130,7 @@ func TestListEncodesEveryFilter(t *testing.T) {
 	page, err := testClient(rec).Events.List(context.Background(), &EventListParams{
 		From: from, To: from.Add(24 * time.Hour),
 		Page: 2, Limit: 20, Visitor: "visitor-test", Level: "high",
+		Kind: VisitorKindAIBot, AIProvider: "OpenAI", AIPurpose: AIPurposeUserFetch,
 	})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -142,6 +143,7 @@ func TestListEncodesEveryFilter(t *testing.T) {
 	for name, want := range map[string]string{
 		"from": "2026-09-01T08:30:00Z", "to": "2026-09-02T08:30:00Z",
 		"page": "2", "limit": "20", "visitor": "visitor-test", "level": "high",
+		"kind": "ai_bot", "ai_provider": "OpenAI", "ai_purpose": "user_fetch",
 	} {
 		if got := query.Get(name); got != want {
 			t.Errorf("%s is %q, want %q", name, got, want)

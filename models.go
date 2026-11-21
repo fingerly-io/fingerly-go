@@ -151,7 +151,12 @@ type Event struct {
 	AgentVersion string `json:"agent_version,omitempty"`
 	OS           string `json:"os,omitempty"`
 	DeviceKind   string `json:"device_kind,omitempty"`
-	VisitorKind  string `json:"visitor_kind,omitempty"`
+	// VisitorKind is VisitorKindHuman, VisitorKindAIBot, VisitorKindAutomation
+	// or VisitorKindSearchCrawler.
+	VisitorKind VisitorKind `json:"visitor_kind,omitempty"`
+	// AI names the agent behind the event. Present only when VisitorKind is
+	// VisitorKindAIBot, nil otherwise.
+	AI *AIAgent `json:"ai,omitempty"`
 
 	// SuspectScore is nil when the request was not scored. Never read nil as 0.
 	SuspectScore *int `json:"suspect_score"`
@@ -177,6 +182,41 @@ type Event struct {
 	// Raw is the response body exactly as it arrived, so a field the API adds
 	// after this SDK was released is still reachable without an upgrade.
 	Raw json.RawMessage `json:"-"`
+}
+
+// AIAgent is the AI agent behind an event whose VisitorKind is
+// VisitorKindAIBot: who operates it, what its traffic is for and how far its
+// claim was checked. The identity comes from the user agent, which any client
+// can copy, and is not verified yet.
+type AIAgent struct {
+	// Name is the agent as its operator names it, such as ChatGPT-User.
+	Name string `json:"name"`
+	// Provider is the company that operates it, such as OpenAI. An open
+	// string, not a closed set.
+	Provider string `json:"provider"`
+	// Purpose is AIPurposeTraining, AIPurposeSearch, AIPurposeUserFetch or
+	// AIPurposeAgent.
+	Purpose AIPurpose `json:"purpose"`
+	// Runtime is AIRuntimeProviderCloud, AIRuntimeHostedBrowser or
+	// AIRuntimeUserDevice.
+	Runtime AIRuntime `json:"runtime"`
+	// Declared is true when the agent named itself, in its user agent or a
+	// signature.
+	Declared bool `json:"declared"`
+	// Verification is how the claimed identity was checked, and what that
+	// found.
+	Verification AIVerification `json:"verification"`
+}
+
+// AIVerification is how an AI agent's claimed identity was checked, and what
+// that found.
+type AIVerification struct {
+	// Method is AIVerificationSignature, AIVerificationIPList,
+	// AIVerificationReverseDNS or AIVerificationNone.
+	Method AIVerificationMethod `json:"method"`
+	// Result is AIVerificationPass, AIVerificationFail or
+	// AIVerificationNotAttempted.
+	Result AIVerificationResult `json:"result"`
 }
 
 // Identifiable reports whether the event resolved to a visitor identifier.
@@ -235,4 +275,12 @@ type EventListParams struct {
 	// Level restricts it to SuspectLevelLow, SuspectLevelMedium or
 	// SuspectLevelHigh.
 	Level SuspectLevel
+	// Kind restricts it to one visitor kind, such as VisitorKindAIBot.
+	Kind VisitorKind
+	// AIProvider restricts it to one AI agent operator, exactly as events
+	// name it (case sensitive), such as OpenAI.
+	AIProvider string
+	// AIPurpose restricts it to one AI agent purpose, such as
+	// AIPurposeUserFetch.
+	AIPurpose AIPurpose
 }

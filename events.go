@@ -93,6 +93,15 @@ func (p *EventListParams) query() string {
 	if p.Level != "" {
 		values.Set("level", string(p.Level))
 	}
+	if p.Kind != "" {
+		values.Set("kind", string(p.Kind))
+	}
+	if p.AIProvider != "" {
+		values.Set("ai_provider", p.AIProvider)
+	}
+	if p.AIPurpose != "" {
+		values.Set("ai_purpose", string(p.AIPurpose))
+	}
 	if len(values) == 0 {
 		return ""
 	}
