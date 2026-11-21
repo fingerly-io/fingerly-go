@@ -33,6 +33,9 @@ const (
 	maxSightingCount     = 1_000_000
 	sightingsFlushAge    = 2 * time.Second
 	sightingsDeadline    = 5 * time.Second
+	sightingsFlushWait   = 6 * time.Second
+	sightingsMaxTTL      = 86400
+	sightingsMinWait     = time.Second
 	sightingsTick        = 250 * time.Millisecond
 	sightingsAuthPause   = 60 * time.Second
 	sightingsDefaultWait = 60 * time.Second
@@ -101,6 +104,9 @@ type AgentSightings struct {
 	capacity     int
 	// deadline bounds each flush: sightingsDeadline, shortened in tests.
 	deadline time.Duration
+	// flushWait bounds how long Flush waits for a flush already in flight:
+	// sightingsFlushWait, shortened in tests.
+	flushWait time.Duration
 
 	// now is the clock, injectable for tests. time.Now carries a monotonic
 	// reading, so ages and expiries ignore wall-clock jumps.
@@ -124,8 +130,9 @@ type AgentSightings struct {
 
 	dropped atomic.Uint64
 
-	// flushMu keeps one flush in flight per process.
-	flushMu sync.Mutex
+	// flushing holds one token while a flush is in flight, so at most one
+	// runs per process and Flush can stop waiting for it.
+	flushing chan struct{}
 
 	wake      chan struct{}
 	stop      chan struct{}
@@ -212,12 +219,14 @@ func newAgentSightings(client *Client, options AgentSightingsOptions) (*AgentSig
 		excludePaths: exclude,
 		capacity:     capacity,
 		deadline:     sightingsDeadline,
+		flushWait:    sightingsFlushWait,
 		now:          time.Now,
 		cache:        list.New(),
 		cacheIndex:   make(map[string]*list.Element),
 		pending:      list.New(),
 		pendingKeys:  make(map[string]*list.Element),
 		lastLog:      make(map[string]time.Time),
+		flushing:     make(chan struct{}, 1),
 		wake:         make(chan struct{}, 1),
 		stop:         make(chan struct{}),
 		done:         make(chan struct{}),
@@ -315,10 +324,11 @@ func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 }
 
 // signatureHeader reads one Web Bot Auth header as the proxy forwards it:
-// repeated lines joined as one field list, and left out over 4096 bytes.
+// repeated lines joined as one field list, and left out over 4096 bytes. An
+// empty or whitespace-only header, repeated empty lines included, is absent.
 func signatureHeader(r *http.Request, name string) string {
 	value := strings.Join(r.Header.Values(name), ", ")
-	if len(value) > maxSightingHeader {
+	if len(value) > maxSightingHeader || strings.Trim(value, " \t,") == "" {
 		return ""
 	}
 	return value
@@ -439,14 +449,23 @@ func addCounts(a, b int64) int64 {
 // waiting. Requests already waiting keep counting.
 func (s *AgentSightings) Dropped() uint64 { return s.dropped.Load() }
 
-// Flush sends every waiting report now, waiting first for a flush already in
-// flight. It stops early when the API asks the SDK to wait or refuses a
+// Flush sends every waiting report now, waiting first, at most 6 seconds, for
+// a flush already in flight; when that one is still running it returns without
+// sending. It stops early when the API asks the SDK to wait or refuses a
 // batch. Call it before a serverless invocation ends; ctx bounds it on top of
 // the 5 second deadline each batch has. It never fails: what was not sent is
 // kept or dropped as the API's answer says.
 func (s *AgentSightings) Flush(ctx context.Context) {
-	s.flushMu.Lock()
-	defer s.flushMu.Unlock()
+	wait := time.NewTimer(s.flushWait)
+	defer wait.Stop()
+	select {
+	case s.flushing <- struct{}{}:
+	case <-wait.C:
+		return
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-s.flushing }()
 	for ctx.Err() == nil && s.flushBatch(ctx, false) {
 	}
 }
@@ -496,10 +515,12 @@ func (s *AgentSightings) loop() {
 
 // flushDue sends batches while one is due, unless a flush is in flight.
 func (s *AgentSightings) flushDue() {
-	if !s.flushMu.TryLock() {
+	select {
+	case s.flushing <- struct{}{}:
+	default:
 		return
 	}
-	defer s.flushMu.Unlock()
+	defer func() { <-s.flushing }()
 	for s.flushBatch(context.Background(), true) {
 	}
 }
@@ -515,7 +536,7 @@ func (s *AgentSightings) due(now time.Time) bool {
 }
 
 // flushBatch sends one batch and applies the API's answer. It reports whether
-// another batch may follow straight away. The caller holds flushMu.
+// another batch may follow straight away. The caller holds the flushing token.
 func (s *AgentSightings) flushBatch(ctx context.Context, onlyWhenDue bool) bool {
 	s.mu.Lock()
 	now := s.now()
@@ -564,9 +585,9 @@ func (s *AgentSightings) takeBatch() []*pendingSighting {
 	return batch
 }
 
-// sightingsExchange records how far a report got, so a timeout can be told
-// apart: before the request was written it is safe to retry, after it the API
-// may have counted the batch.
+// sightingsExchange records how far a report got, so a failure can be told
+// apart: before the request was fully written it is safe to retry, after it
+// the API may have counted the batch.
 type sightingsExchange struct {
 	wrote     atomic.Bool
 	responded atomic.Bool
@@ -574,7 +595,11 @@ type sightingsExchange struct {
 
 func (e *sightingsExchange) trace() *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
-		WroteRequest:         func(httptrace.WroteRequestInfo) { e.wrote.Store(true) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				e.wrote.Store(true)
+			}
+		},
 		GotFirstResponseByte: func() { e.responded.Store(true) },
 	}
 }
@@ -626,27 +651,30 @@ func (s *AgentSightings) settle(
 		default:
 			return false, s.limited(now, "status", err)
 		}
-	case errors.As(err, &connErr) && !exchange.responded.Load() &&
-		!(connErr.Timeout && exchange.wrote.Load()):
-		// No answer came back and nothing says the API received the batch:
-		// a refused connection, a failed handshake, a connection closed before
-		// any answer, or a timeout before the request was written.
+	case errors.As(err, &connErr) && !exchange.responded.Load() && !exchange.wrote.Load():
+		// The request was never fully written, so the API cannot have counted
+		// the batch: a refused connection, a failed handshake, a connection
+		// closed or a timeout before the request went out.
 		s.keep(batch)
 		s.backOff(now)
 		return false, nil
 	case errors.As(err, &connErr) && connErr.Timeout:
 		return false, s.limited(now, "timeout", errSightingsTimedOut)
 	default:
-		// An answer that broke off or could not be decoded.
+		// A connection closed or reset once the request was written, an
+		// answer that broke off, or one that could not be decoded: the API
+		// may have counted the batch.
 		return false, s.limited(now, "answer", err)
 	}
 }
 
 // retryWait is how long a 429 asks the SDK to wait: Retry-After, or without
 // one, until the next UTC day for the daily allowance and a minute otherwise.
+// A Retry-After of 0 or in the past still waits a second; a negative or
+// unreadable one reaches here as none.
 func retryWait(now time.Time, apiErr *APIError) time.Duration {
 	if apiErr.RetryAfter != nil {
-		return time.Duration(*apiErr.RetryAfter) * time.Second
+		return max(time.Duration(*apiErr.RetryAfter)*time.Second, sightingsMinWait)
 	}
 	if apiErr.RateLimitScope == RateLimitScopeDaily {
 		utc := now.UTC()
@@ -693,8 +721,8 @@ func (s *AgentSightings) keep(batch []*pendingSighting) {
 	}
 }
 
-// store remembers every answer with a ttl, after dropping every remembered
-// answer when the rules changed. The caller holds mu.
+// store remembers every answer with a ttl, for at most a day, after dropping
+// every remembered answer when the rules changed. The caller holds mu.
 func (s *AgentSightings) store(now time.Time, batch []*pendingSighting, answer *AgentSightingsAnswer) {
 	if answer.RulesVersion != s.rulesVersion {
 		s.cache.Init()
@@ -708,7 +736,7 @@ func (s *AgentSightings) store(now time.Time, batch []*pendingSighting, answer *
 		entry := &sightingEntry{
 			key:     batch[i].key,
 			answer:  item,
-			expires: now.Add(time.Duration(item.TTL) * time.Second),
+			expires: now.Add(time.Duration(min(item.TTL, sightingsMaxTTL)) * time.Second),
 		}
 		if element, ok := s.cacheIndex[entry.key]; ok {
 			element.Value = entry

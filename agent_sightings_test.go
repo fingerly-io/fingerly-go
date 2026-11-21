@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -494,6 +495,29 @@ func TestOversizedHeadersAreLeftOut(t *testing.T) {
 	}
 }
 
+func TestBlankSignatureHeadersAreAbsent(t *testing.T) {
+	h := newHarness(t, nil)
+	blank := served("ua", "198.51.100.1", map[string]string{
+		"Signature":       "   ",
+		"Signature-Input": "",
+		"Signature-Agent": " \t ",
+	})
+	blank.Header.Add("Signature-Input", "")
+	sighting, ok := h.sightingOf(blank)
+	if !ok || sighting.item.Signature != "" || sighting.item.SignatureInput != "" ||
+		sighting.item.SignatureAgent != "" || sighting.signed {
+		t.Fatalf("sighting %+v", sighting.item)
+	}
+	if want, _ := AgentSightingKey("ua", "198.51.100.1", "", false); sighting.key != want {
+		t.Fatal("the key counts a blank header")
+	}
+	h.Report(blank, "text/html")
+	h.Report(blank, "text/html")
+	if items := h.pendingItems(); len(items) != 1 || items[0].Count != 2 {
+		t.Fatalf("pending %+v", items)
+	}
+}
+
 func TestAnUnresolvedAddressIsNotReported(t *testing.T) {
 	h := newHarness(t, nil)
 	r := served("ua", "10.0.0.1, 10.0.0.2", nil)
@@ -656,6 +680,29 @@ func TestOneFlushIsInFlightAtATime(t *testing.T) {
 	}
 }
 
+func TestFlushWaitsABoundedTimeForAFlushInFlight(t *testing.T) {
+	h := newHarness(t, nil)
+	if h.flushWait != 6*time.Second {
+		t.Fatalf("waits %s", h.flushWait)
+	}
+	h.flushWait = 100 * time.Millisecond
+	h.Report(served("ua", "198.51.100.1", nil), "text/html")
+	h.flushing <- struct{}{} // A flush that never finishes is in flight.
+	started := time.Now()
+	h.Flush(context.Background())
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("waited %s", elapsed)
+	}
+	if len(h.api.sent()) != 0 || len(h.pendingItems()) != 1 {
+		t.Fatal("sent alongside the flush in flight")
+	}
+	<-h.flushing
+	h.Flush(context.Background())
+	if len(h.api.sent()) != 1 {
+		t.Fatal("did not send once the flush in flight ended")
+	}
+}
+
 func TestA200StoresAnswersAndDropsTheBatch(t *testing.T) {
 	h := newHarness(t, nil)
 	h.Report(served("ua", "198.51.100.1", nil), "text/html")
@@ -812,9 +859,11 @@ func TestATransportErrorBeforeAnAnswerKeepsTheBatch(t *testing.T) {
 	}
 }
 
-func TestAConnectionClosedWithoutAnAnswerKeepsTheBatch(t *testing.T) {
+func TestAConnectionClosedAfterTheRequestWasWrittenDropsTheBatch(t *testing.T) {
 	h := newHarness(t, nil)
 	h.api.setRespond(func(w http.ResponseWriter, _ []AgentSighting) {
+		// The request body was read in full, then the connection is closed
+		// without an answer.
 		conn, _, err := http.NewResponseController(w).Hijack()
 		if err == nil {
 			_ = conn.Close()
@@ -822,8 +871,95 @@ func TestAConnectionClosedWithoutAnAnswerKeepsTheBatch(t *testing.T) {
 	})
 	h.Report(served("a", "198.51.100.1", nil), "text/html")
 	h.Flush(context.Background())
-	if len(h.pendingItems()) != 1 {
-		t.Fatal("the batch was dropped")
+	if len(h.pendingItems()) != 0 || h.backoff != 0 || !h.pausedUntil.IsZero() {
+		t.Fatal("a batch the API may have counted was kept")
+	}
+	if h.errors.count() != 1 {
+		t.Fatalf("logged %d times", h.errors.count())
+	}
+}
+
+func TestABodyCutShortDropsTheBatch(t *testing.T) {
+	h := newHarness(t, nil)
+	h.api.setRespond(func(w http.ResponseWriter, _ []AgentSighting) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rules_version":"r","items":[`))
+		http.NewResponseController(w).Flush()
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	})
+	h.Report(served("a", "198.51.100.1", nil), "text/html")
+	h.Flush(context.Background())
+	if len(h.pendingItems()) != 0 || h.backoff != 0 || !h.pausedUntil.IsZero() {
+		t.Fatal("a batch the API may have counted was kept")
+	}
+}
+
+func TestAWriteThatFailedIsNotWritten(t *testing.T) {
+	var exchange sightingsExchange
+	trace := exchange.trace()
+	trace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New("broken pipe")})
+	if exchange.wrote.Load() {
+		t.Fatal("a failed write counted as written")
+	}
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	if !exchange.wrote.Load() {
+		t.Fatal("a full write not counted")
+	}
+}
+
+func TestATTLIsClampedToADay(t *testing.T) {
+	h := newHarness(t, nil)
+	h.api.setRespond(answerAll("r", 10*86400))
+	r := served("ua", "198.51.100.1", nil)
+	h.Report(r, "text/html")
+	h.Flush(context.Background())
+	h.clock.Advance(86400*time.Second - time.Millisecond)
+	if !h.Lookup(r).Known() {
+		t.Fatal("expired before a day")
+	}
+	h.clock.Advance(time.Millisecond)
+	if h.Lookup(r).Known() {
+		t.Fatal("served for more than a day")
+	}
+}
+
+func TestARetryAfterOfZeroOrInThePastWaitsASecond(t *testing.T) {
+	now := time.Date(2026, 11, 21, 23, 0, 0, 0, time.UTC)
+	for _, header := range []string{"0", "Sat, 21 Nov 2026 22:00:00 GMT"} {
+		apiErr := &APIError{RetryAfter: parseRetryAfter(header, now), RateLimitScope: RateLimitScopeDaily}
+		if got := retryWait(now, apiErr); got != time.Second {
+			t.Fatalf("Retry-After %q waits %s", header, got)
+		}
+	}
+	// Negative or unreadable is treated as missing.
+	for _, header := range []string{"-5", "soon"} {
+		if got := retryWait(now, &APIError{RetryAfter: parseRetryAfter(header, now)}); got != time.Minute {
+			t.Fatalf("Retry-After %q waits %s", header, got)
+		}
+		daily := &APIError{RetryAfter: parseRetryAfter(header, now), RateLimitScope: RateLimitScopeDaily}
+		if got := retryWait(now, daily); got != time.Hour {
+			t.Fatalf("daily Retry-After %q waits %s", header, got)
+		}
+	}
+
+	h := newHarness(t, nil)
+	h.api.setRespond(answerStatus(http.StatusTooManyRequests, "rate_limited",
+		map[string]string{"Retry-After": "0", "Fingerly-RateLimit-Scope": "key"}))
+	h.Report(served("ua", "198.51.100.1", nil), "text/html")
+	h.Flush(context.Background())
+	h.api.setRespond(answerAll("r", 60))
+	h.Flush(context.Background())
+	if len(h.api.sent()) != 1 {
+		t.Fatal("flushed again without pausing")
+	}
+	h.clock.Advance(time.Second)
+	h.Flush(context.Background())
+	if len(h.api.sent()) != 2 {
+		t.Fatal("did not resume after a second")
 	}
 }
 
