@@ -130,6 +130,9 @@ func (c *Client) apiError(response *http.Response) *APIError {
 		Status:     response.StatusCode,
 		RequestID:  c.redact(response.Header.Get("X-Request-Id")),
 		RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
+		RateLimitScope: c.redact(
+			strings.TrimSpace(response.Header.Get("Fingerly-RateLimit-Scope")),
+		),
 	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))

@@ -1,0 +1,827 @@
+package fingerly
+
+import (
+	"bufio"
+	"container/list"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"net/netip"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// The bounds and timings every server SDK keeps for agent sightings.
+const (
+	// DefaultAgentCacheSize is how many answers AgentSightings remembers when
+	// AgentSightingsOptions.CacheSize is 0: about 1.5 MB.
+	DefaultAgentCacheSize = 4096
+	// MaxAgentCacheSize is the most answers AgentSightings ever remembers,
+	// about 25 MB. A larger CacheSize is lowered to it.
+	MaxAgentCacheSize = 65536
+
+	maxPendingSightings  = 1000
+	maxSightingsBytes    = 64 << 10
+	maxSightingHeader    = 4096
+	maxSightingCount     = 1_000_000
+	sightingsFlushAge    = 2 * time.Second
+	sightingsDeadline    = 5 * time.Second
+	sightingsTick        = 250 * time.Millisecond
+	sightingsAuthPause   = 60 * time.Second
+	sightingsDefaultWait = 60 * time.Second
+	sightingsBackoffMin  = time.Second
+	sightingsBackoffMax  = 60 * time.Second
+	sightingsLogEvery    = time.Minute
+)
+
+// agentPaths are reported whatever their content type or status: the files
+// crawlers and AI agents read to decide what to fetch.
+var agentPaths = []string{"/robots.txt", "/llms.txt", "/llms-full.txt"}
+
+// defaultAgentContentTypes are the responses reported by default: pages.
+var defaultAgentContentTypes = []string{"text/html", "application/xhtml+xml"}
+
+// AgentSightingsOptions configures AgentSightings. ClientIP is required.
+type AgentSightingsOptions struct {
+	// ClientIP resolves the visitor's address, exactly as ProxyOptions.ClientIP
+	// does: one IPv4 or IPv6 literal read from a header your own
+	// infrastructure sets, falling back to the TCP peer in r.RemoteAddr. Never
+	// the left-most X-Forwarded-For value: the visitor writes it. A request
+	// whose address does not resolve is not reported, and Lookup answers
+	// AgentUnknown for it.
+	ClientIP func(*http.Request) string
+
+	// CacheSize is how many answers are remembered, least recently used
+	// first out. 0 means DefaultAgentCacheSize; anything above
+	// MaxAgentCacheSize is lowered to it.
+	CacheSize int
+
+	// ContentTypes are the response media types reported, compared without
+	// parameters and ignoring case. Nil means text/html and
+	// application/xhtml+xml; an empty, non-nil list reports by path only.
+	ContentTypes []string
+	// IncludePaths are path prefixes reported whatever their content type.
+	// /robots.txt, /llms.txt and /llms-full.txt are always reported.
+	IncludePaths []string
+	// ExcludePaths are path prefixes never reported, even when another rule
+	// matches, the three files above included.
+	ExcludePaths []string
+
+	// OnError is called for a report the API refused or could not take, at
+	// most once a minute per kind of failure, and for a ClientIP that returned
+	// no valid address. Leave it nil to log one line through slog.Default().
+	// The error never carries a key, an address, a user agent or any header.
+	OnError func(error)
+}
+
+// AgentSightings reports the requests your server served, so that AI crawlers
+// and fetchers that never run a page's JavaScript are seen, and remembers what
+// the API answered so Lookup can answer in memory.
+//
+// Reporting happens in the background, after each response, and never delays
+// it. Lookup never waits on the network and never fails: a request it holds no
+// answer for is AgentUnknown, which means "serve as usual".
+//
+// Build one per process, mount its Middleware, and Close it on shutdown. In a
+// serverless function, call Flush before the invocation ends.
+type AgentSightings struct {
+	client       *Client
+	clientIP     func(*http.Request) string
+	onError      func(error)
+	contentTypes map[string]struct{}
+	includePaths []string
+	excludePaths []string
+	capacity     int
+	// deadline bounds each flush: sightingsDeadline, shortened in tests.
+	deadline time.Duration
+
+	// now is the clock, injectable for tests. time.Now carries a monotonic
+	// reading, so ages and expiries ignore wall-clock jumps.
+	now func() time.Time
+
+	mu sync.Mutex
+	// cache is the LRU of answers: front is most recently used.
+	cache        *list.List
+	cacheIndex   map[string]*list.Element
+	rulesVersion string
+	// pending holds unreported requests, oldest first; pendingKeys indexes
+	// the unsigned ones by key so repeats fold into one count.
+	pending      *list.List
+	pendingKeys  map[string]*list.Element
+	pendingBytes int
+	inFlight     int
+	pausedUntil  time.Time
+	backoff      time.Duration
+	closed       bool
+	lastLog      map[string]time.Time
+
+	dropped atomic.Uint64
+
+	// flushMu keeps one flush in flight per process.
+	flushMu sync.Mutex
+
+	wake      chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	running   atomic.Bool
+	closeOnce sync.Once
+}
+
+// sightingEntry is one remembered answer.
+type sightingEntry struct {
+	key     string
+	answer  AgentAnswer
+	expires time.Time
+}
+
+// pendingSighting is one unreported request: the first sighting's raw fields
+// and how many times it was seen.
+type pendingSighting struct {
+	key       string
+	signed    bool
+	item      AgentSighting
+	firstSeen time.Time
+	size      int
+}
+
+// NewAgentSightings builds the reporter around a client made with New, and
+// starts its background flusher. It reports the client's configuration error,
+// if any, immediately.
+func NewAgentSightings(client *Client, options AgentSightingsOptions) (*AgentSightings, error) {
+	sightings, err := newAgentSightings(client, options)
+	if err != nil {
+		return nil, err
+	}
+	sightings.start()
+	return sightings, nil
+}
+
+// newAgentSightings builds the reporter without starting its flusher.
+func newAgentSightings(client *Client, options AgentSightingsOptions) (*AgentSightings, error) {
+	if client == nil {
+		return nil, errors.New("fingerly: AgentSightings needs a client made with New")
+	}
+	if client.configErr != nil {
+		return nil, client.configErr
+	}
+	if options.ClientIP == nil {
+		return nil, errors.New("fingerly: ClientIP is required")
+	}
+	capacity := options.CacheSize
+	switch {
+	case capacity < 0:
+		return nil, errors.New("fingerly: CacheSize must not be negative")
+	case capacity == 0:
+		capacity = DefaultAgentCacheSize
+	case capacity > MaxAgentCacheSize:
+		capacity = MaxAgentCacheSize
+	}
+	contentTypes := options.ContentTypes
+	if contentTypes == nil {
+		contentTypes = defaultAgentContentTypes
+	}
+	types := make(map[string]struct{}, len(contentTypes))
+	for _, value := range contentTypes {
+		media := mediaType(value)
+		if media == "" {
+			return nil, errors.New("fingerly: ContentTypes entries must be media types such as text/html")
+		}
+		types[media] = struct{}{}
+	}
+	include, err := pathPrefixes(options.IncludePaths, "IncludePaths")
+	if err != nil {
+		return nil, err
+	}
+	exclude, err := pathPrefixes(options.ExcludePaths, "ExcludePaths")
+	if err != nil {
+		return nil, err
+	}
+	return &AgentSightings{
+		client:       client,
+		clientIP:     options.ClientIP,
+		onError:      options.OnError,
+		contentTypes: types,
+		includePaths: include,
+		excludePaths: exclude,
+		capacity:     capacity,
+		deadline:     sightingsDeadline,
+		now:          time.Now,
+		cache:        list.New(),
+		cacheIndex:   make(map[string]*list.Element),
+		pending:      list.New(),
+		pendingKeys:  make(map[string]*list.Element),
+		lastLog:      make(map[string]time.Time),
+		wake:         make(chan struct{}, 1),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+	}, nil
+}
+
+func pathPrefixes(values []string, name string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !strings.HasPrefix(value, "/") {
+			return nil, errors.New("fingerly: " + name + " entries must start with /")
+		}
+		out = append(out, value)
+	}
+	return out, nil
+}
+
+// mediaType is a Content-Type without its parameters, trimmed and lowercased.
+func mediaType(value string) string {
+	if i := strings.IndexByte(value, ';'); i >= 0 {
+		value = value[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// AgentSightingKey is the cache key every server SDK computes for a request:
+// the lowercase hex of the first 16 bytes of SHA-256 over the user agent, the
+// canonical address, the Signature-Agent header and whether the request was
+// signed, separated by zero bytes. clientIP must already be one literal.
+func AgentSightingKey(userAgent, clientIP, signatureAgent string, signed bool) (string, bool) {
+	canonical, ok := canonicalIP(clientIP)
+	if !ok {
+		return "", false
+	}
+	return sightingKey(userAgent, canonical, signatureAgent, signed), true
+}
+
+func sightingKey(userAgent, canonical, signatureAgent string, signed bool) string {
+	flag := "0"
+	if signed {
+		flag = "1"
+	}
+	hash := sha256.New()
+	for i, part := range []string{userAgent, canonical, signatureAgent, flag} {
+		if i > 0 {
+			hash.Write([]byte{0})
+		}
+		hash.Write([]byte(part))
+	}
+	return hex.EncodeToString(hash.Sum(nil)[:16])
+}
+
+// canonicalIP parses one IP literal and prints it canonically: an
+// IPv4-mapped IPv6 address as IPv4, IPv6 as RFC 5952. A list, a port, a zone
+// or surrounding space is refused, as the proxy refuses them.
+func canonicalIP(value string) (string, bool) {
+	address, err := netip.ParseAddr(value)
+	if err != nil || address.Zone() != "" {
+		return "", false
+	}
+	return address.Unmap().String(), true
+}
+
+// sightingOf reads what is reported for r, or reports false when r is not
+// reportable: a user agent over 4096 bytes or an address that does not
+// resolve.
+func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
+	userAgent := r.Header.Get("User-Agent")
+	if len(userAgent) > maxSightingHeader {
+		return pendingSighting{}, false
+	}
+	address, ok := canonicalIP(s.clientIP(r))
+	if !ok {
+		s.logLimited("client_ip", errNoClientIP)
+		return pendingSighting{}, false
+	}
+	item := AgentSighting{
+		UserAgent:      userAgent,
+		ClientIP:       address,
+		Host:           r.Host,
+		Method:         r.Method,
+		Signature:      signatureHeader(r, "Signature"),
+		SignatureInput: signatureHeader(r, "Signature-Input"),
+		SignatureAgent: signatureHeader(r, "Signature-Agent"),
+		Count:          1,
+	}
+	signed := item.Signature != "" && item.SignatureInput != ""
+	return pendingSighting{
+		key:    sightingKey(userAgent, address, item.SignatureAgent, signed),
+		signed: signed,
+		item:   item,
+		size: len(item.UserAgent) + len(item.ClientIP) + len(item.Host) + len(item.Method) +
+			len(item.Signature) + len(item.SignatureInput) + len(item.SignatureAgent),
+	}, true
+}
+
+// signatureHeader reads one Web Bot Auth header as the proxy forwards it:
+// repeated lines joined as one field list, and left out over 4096 bytes.
+func signatureHeader(r *http.Request, name string) string {
+	value := strings.Join(r.Header.Values(name), ", ")
+	if len(value) > maxSightingHeader {
+		return ""
+	}
+	return value
+}
+
+// Lookup returns what the API last answered for a request like r, or
+// AgentUnknown when it holds no unexpired answer. It never waits on the
+// network and never fails; serve an AgentUnknown request as usual.
+//
+// A signed request is checked every time, so it is always AgentUnknown here.
+func (s *AgentSightings) Lookup(r *http.Request) AgentAnswer {
+	sighting, ok := s.sightingOf(r)
+	if !ok {
+		return AgentUnknown
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	element, ok := s.cacheIndex[sighting.key]
+	if !ok {
+		return AgentUnknown
+	}
+	entry := element.Value.(*sightingEntry)
+	if !s.now().Before(entry.expires) {
+		s.cache.Remove(element)
+		delete(s.cacheIndex, entry.key)
+		return AgentUnknown
+	}
+	s.cache.MoveToFront(element)
+	answer := entry.answer
+	if answer.AI != nil {
+		ai := *answer.AI
+		answer.AI = &ai
+	}
+	return answer
+}
+
+// Report records that r was served with a response of the given Content-Type,
+// when the reporting rules cover it. Middleware calls it after each response;
+// call it yourself from a stack that does not use net/http handlers. It never
+// blocks on the network.
+func (s *AgentSightings) Report(r *http.Request, contentType string) {
+	if !s.inScope(r.URL.Path, contentType) {
+		return
+	}
+	s.record(r)
+}
+
+// inScope applies the reporting rules: never by user agent, address or any
+// request header, only by the customer's own path and response type.
+func (s *AgentSightings) inScope(path, contentType string) bool {
+	for _, prefix := range s.excludePaths {
+		if strings.HasPrefix(path, prefix) {
+			return false
+		}
+	}
+	for _, fixed := range agentPaths {
+		if path == fixed {
+			return true
+		}
+	}
+	for _, prefix := range s.includePaths {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	_, ok := s.contentTypes[mediaType(contentType)]
+	return ok
+}
+
+// record adds r to the pending reports.
+func (s *AgentSightings) record(r *http.Request) {
+	sighting, ok := s.sightingOf(r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if !sighting.signed {
+		if element, ok := s.pendingKeys[sighting.key]; ok {
+			pending := element.Value.(*pendingSighting)
+			pending.item.Count = addCounts(pending.item.Count, 1)
+			s.mu.Unlock()
+			return
+		}
+	}
+	if s.pending.Len()+s.inFlight >= maxPendingSightings {
+		s.mu.Unlock()
+		s.dropped.Add(1)
+		return
+	}
+	sighting.firstSeen = s.now()
+	element := s.pending.PushBack(&sighting)
+	if !sighting.signed {
+		s.pendingKeys[sighting.key] = element
+	}
+	s.pendingBytes += sighting.size
+	full := s.pending.Len() >= maxSightingsItems || s.pendingBytes >= maxSightingsBytes
+	s.mu.Unlock()
+	if full {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func addCounts(a, b int64) int64 {
+	if a+b > maxSightingCount {
+		return maxSightingCount
+	}
+	return a + b
+}
+
+// Dropped is how many requests were not reported because 1000 were already
+// waiting. Requests already waiting keep counting.
+func (s *AgentSightings) Dropped() uint64 { return s.dropped.Load() }
+
+// Flush sends every waiting report now, waiting first for a flush already in
+// flight. It stops early when the API asks the SDK to wait or refuses a
+// batch. Call it before a serverless invocation ends; ctx bounds it on top of
+// the 5 second deadline each batch has. It never fails: what was not sent is
+// kept or dropped as the API's answer says.
+func (s *AgentSightings) Flush(ctx context.Context) {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	for ctx.Err() == nil && s.flushBatch(ctx, false) {
+	}
+}
+
+// Close stops the background flusher and sends what is waiting. Requests
+// served afterwards are not reported. It is safe to call more than once.
+func (s *AgentSightings) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		if s.started() {
+			<-s.done
+		}
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+		s.Flush(context.Background())
+	})
+	return nil
+}
+
+// started reports whether start launched the flusher goroutine.
+func (s *AgentSightings) started() bool { return s.running.Load() }
+
+// start launches the background flusher.
+func (s *AgentSightings) start() {
+	s.running.Store(true)
+	go s.loop()
+}
+
+// loop flushes when a batch is due: 200 waiting, 64 KiB waiting, or the oldest
+// waiting for 2 seconds. A goroutine never keeps a Go program alive, so
+// nothing more is needed for it to end with the process.
+func (s *AgentSightings) loop() {
+	defer close(s.done)
+	ticker := time.NewTicker(sightingsTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+		case <-s.wake:
+		}
+		s.flushDue()
+	}
+}
+
+// flushDue sends batches while one is due, unless a flush is in flight.
+func (s *AgentSightings) flushDue() {
+	if !s.flushMu.TryLock() {
+		return
+	}
+	defer s.flushMu.Unlock()
+	for s.flushBatch(context.Background(), true) {
+	}
+}
+
+// due reports whether a batch should go now. The caller holds mu.
+func (s *AgentSightings) due(now time.Time) bool {
+	front := s.pending.Front()
+	if front == nil {
+		return false
+	}
+	return s.pending.Len() >= maxSightingsItems || s.pendingBytes >= maxSightingsBytes ||
+		now.Sub(front.Value.(*pendingSighting).firstSeen) >= sightingsFlushAge
+}
+
+// flushBatch sends one batch and applies the API's answer. It reports whether
+// another batch may follow straight away. The caller holds flushMu.
+func (s *AgentSightings) flushBatch(ctx context.Context, onlyWhenDue bool) bool {
+	s.mu.Lock()
+	now := s.now()
+	if now.Before(s.pausedUntil) || s.pending.Len() == 0 || (onlyWhenDue && !s.due(now)) {
+		s.mu.Unlock()
+		return false
+	}
+	batch := s.takeBatch()
+	s.mu.Unlock()
+
+	items := make([]AgentSighting, len(batch))
+	for i, pending := range batch {
+		items[i] = pending.item
+	}
+	var exchange sightingsExchange
+	callCtx, cancel := context.WithTimeout(httptrace.WithClientTrace(ctx, exchange.trace()), s.deadline)
+	answer, err := s.client.Agents.Sightings(callCtx, items)
+	cancel()
+	more, failure := s.settle(batch, answer, err, &exchange)
+	s.emit(failure)
+	return more
+}
+
+// takeBatch moves the oldest waiting reports in flight: up to 200, and no
+// more than 64 KiB of fields unless the first alone is larger. The caller
+// holds mu.
+func (s *AgentSightings) takeBatch() []*pendingSighting {
+	var batch []*pendingSighting
+	bytes := 0
+	for element := s.pending.Front(); element != nil && len(batch) < maxSightingsItems; {
+		pending := element.Value.(*pendingSighting)
+		if len(batch) > 0 && bytes+pending.size > maxSightingsBytes {
+			break
+		}
+		next := element.Next()
+		s.pending.Remove(element)
+		if !pending.signed {
+			delete(s.pendingKeys, pending.key)
+		}
+		s.pendingBytes -= pending.size
+		bytes += pending.size
+		batch = append(batch, pending)
+		element = next
+	}
+	s.inFlight += len(batch)
+	return batch
+}
+
+// sightingsExchange records how far a report got, so a timeout can be told
+// apart: before the request was written it is safe to retry, after it the API
+// may have counted the batch.
+type sightingsExchange struct {
+	wrote     atomic.Bool
+	responded atomic.Bool
+}
+
+func (e *sightingsExchange) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		WroteRequest:         func(httptrace.WroteRequestInfo) { e.wrote.Store(true) },
+		GotFirstResponseByte: func() { e.responded.Store(true) },
+	}
+}
+
+// Why a batch was dropped, for OnError.
+var (
+	errSightingsMismatch = errors.New("fingerly: the sightings answer did not match the batch")
+	errSightingsTimedOut = errors.New("fingerly: the sightings report timed out after it was sent; dropped so it is not counted twice")
+)
+
+// settle applies the API's answer to a batch, following the agent sightings
+// contract's failure table. It reports whether another batch may follow, and
+// the failure to report, if one is due.
+func (s *AgentSightings) settle(
+	batch []*pendingSighting, answer *AgentSightingsAnswer, err error, exchange *sightingsExchange,
+) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight -= len(batch)
+	now := s.now()
+
+	if err == nil {
+		if len(answer.Items) != len(batch) {
+			return false, s.limited(now, "mismatch", errSightingsMismatch)
+		}
+		s.backoff = 0
+		s.store(now, batch, answer)
+		return true, nil
+	}
+
+	var apiErr *APIError
+	var connErr *ConnectionError
+	switch {
+	case errors.As(err, &apiErr):
+		switch apiErr.Status {
+		case http.StatusTooManyRequests:
+			s.keep(batch)
+			s.pausedUntil = now.Add(retryWait(now, apiErr))
+			return false, nil
+		case http.StatusServiceUnavailable:
+			s.keep(batch)
+			s.backOff(now)
+			return false, nil
+		case http.StatusUnauthorized, http.StatusForbidden:
+			s.pausedUntil = now.Add(sightingsAuthPause)
+			return false, s.limited(now, "auth", err)
+		case http.StatusUnprocessableEntity:
+			return false, s.limited(now, "invalid", err)
+		default:
+			return false, s.limited(now, "status", err)
+		}
+	case errors.As(err, &connErr) && !exchange.responded.Load() &&
+		!(connErr.Timeout && exchange.wrote.Load()):
+		// No answer came back and nothing says the API received the batch:
+		// a refused connection, a failed handshake, a connection closed before
+		// any answer, or a timeout before the request was written.
+		s.keep(batch)
+		s.backOff(now)
+		return false, nil
+	case errors.As(err, &connErr) && connErr.Timeout:
+		return false, s.limited(now, "timeout", errSightingsTimedOut)
+	default:
+		// An answer that broke off or could not be decoded.
+		return false, s.limited(now, "answer", err)
+	}
+}
+
+// retryWait is how long a 429 asks the SDK to wait: Retry-After, or without
+// one, until the next UTC day for the daily allowance and a minute otherwise.
+func retryWait(now time.Time, apiErr *APIError) time.Duration {
+	if apiErr.RetryAfter != nil {
+		return time.Duration(*apiErr.RetryAfter) * time.Second
+	}
+	if apiErr.RateLimitScope == RateLimitScopeDaily {
+		utc := now.UTC()
+		midnight := time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
+		return midnight.Sub(utc)
+	}
+	return sightingsDefaultWait
+}
+
+// backOff pauses flushing for the next step of 1, 2, 4 ... 60 seconds. The
+// caller holds mu.
+func (s *AgentSightings) backOff(now time.Time) {
+	switch {
+	case s.backoff == 0:
+		s.backoff = sightingsBackoffMin
+	default:
+		s.backoff *= 2
+	}
+	if s.backoff > sightingsBackoffMax {
+		s.backoff = sightingsBackoffMax
+	}
+	s.pausedUntil = now.Add(s.backoff)
+}
+
+// keep puts a batch back as the oldest waiting reports. A key seen again
+// while the batch was in flight folds into the kept report. The caller holds
+// mu.
+func (s *AgentSightings) keep(batch []*pendingSighting) {
+	for i := len(batch) - 1; i >= 0; i-- {
+		pending := batch[i]
+		if !pending.signed {
+			if element, ok := s.pendingKeys[pending.key]; ok {
+				newer := element.Value.(*pendingSighting)
+				pending.item.Count = addCounts(pending.item.Count, newer.item.Count)
+				s.pending.Remove(element)
+				s.pendingBytes -= newer.size
+			}
+		}
+		element := s.pending.PushFront(pending)
+		if !pending.signed {
+			s.pendingKeys[pending.key] = element
+		}
+		s.pendingBytes += pending.size
+	}
+}
+
+// store remembers every answer with a ttl, after dropping every remembered
+// answer when the rules changed. The caller holds mu.
+func (s *AgentSightings) store(now time.Time, batch []*pendingSighting, answer *AgentSightingsAnswer) {
+	if answer.RulesVersion != s.rulesVersion {
+		s.cache.Init()
+		clear(s.cacheIndex)
+		s.rulesVersion = answer.RulesVersion
+	}
+	for i, item := range answer.Items {
+		if item.TTL <= 0 {
+			continue
+		}
+		entry := &sightingEntry{
+			key:     batch[i].key,
+			answer:  item,
+			expires: now.Add(time.Duration(item.TTL) * time.Second),
+		}
+		if element, ok := s.cacheIndex[entry.key]; ok {
+			element.Value = entry
+			s.cache.MoveToFront(element)
+			continue
+		}
+		s.cacheIndex[entry.key] = s.cache.PushFront(entry)
+		for s.cache.Len() > s.capacity {
+			oldest := s.cache.Back()
+			s.cache.Remove(oldest)
+			delete(s.cacheIndex, oldest.Value.(*sightingEntry).key)
+		}
+	}
+}
+
+// logLimited reports err at most once a minute for its kind.
+func (s *AgentSightings) logLimited(kind string, err error) {
+	s.mu.Lock()
+	err = s.limited(s.now(), kind, err)
+	s.mu.Unlock()
+	s.emit(err)
+}
+
+// limited returns err when its kind was not reported in the last minute, and
+// nil otherwise. The caller holds mu, and emits the result after releasing it.
+func (s *AgentSightings) limited(now time.Time, kind string, err error) error {
+	if last, ok := s.lastLog[kind]; ok && now.Sub(last) < sightingsLogEvery {
+		return nil
+	}
+	s.lastLog[kind] = now
+	return err
+}
+
+// emit hands a failure to OnError, or logs one line about it.
+func (s *AgentSightings) emit(err error) {
+	if err == nil {
+		return
+	}
+	if s.onError != nil {
+		s.onError(err)
+		return
+	}
+	slog.Default().Warn("fingerly agent sightings: report failed", "error", err.Error())
+}
+
+// Middleware reports every response its rules cover after next has written
+// it, and never delays it. It works with any router built on net/http:
+//
+//	mux.Handle("/", sightings.Middleware(site))
+func (s *AgentSightings) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writer := &sightingsWriter{ResponseWriter: w}
+		next.ServeHTTP(writer, r)
+		s.Report(r, writer.contentType())
+	})
+}
+
+// sightingsWriter notes the response's Content-Type as it is written. It
+// unwraps for http.ResponseController and passes Flush and Hijack through.
+type sightingsWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+	sniffed     string
+	sent        string
+}
+
+func (w *sightingsWriter) WriteHeader(status int) {
+	if !w.wroteHeader && status >= 200 {
+		w.wroteHeader = true
+		w.sent = w.Header().Get("Content-Type")
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *sightingsWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		header := w.Header()
+		w.sent = header.Get("Content-Type")
+		// net/http sniffs a body written without a Content-Type, so the
+		// visitor saw the sniffed type; a nil value suppresses sniffing.
+		if _, set := header["Content-Type"]; !set && len(p) > 0 {
+			w.sniffed = http.DetectContentType(p)
+		}
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// contentType is the type the response went out with.
+func (w *sightingsWriter) contentType() string {
+	if !w.wroteHeader {
+		// Nothing written: net/http sends an empty 200 with these headers.
+		return w.Header().Get("Content-Type")
+	}
+	if w.sent != "" {
+		return w.sent
+	}
+	return w.sniffed
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *sightingsWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Flush passes through to the underlying writer, for streamed pages.
+func (w *sightingsWriter) Flush() {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.sent = w.Header().Get("Content-Type")
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Hijack passes through to the underlying writer, for upgraded connections.
+func (w *sightingsWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}

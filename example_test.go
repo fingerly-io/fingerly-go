@@ -192,4 +192,35 @@ func ExampleNewProxy() {
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 
+// AgentSightings reports what the site served after each response, and
+// answers from memory what sent a request.
+func ExampleNewAgentSightings() {
+	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+	sightings, err := fingerly.NewAgentSightings(client, fingerly.AgentSightingsOptions{
+		// The same trusted source as the proxy's ClientIP.
+		ClientIP: func(r *http.Request) string {
+			if address := r.Header.Get("X-Real-IP"); address != "" {
+				return address
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			return host
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sightings.Close()
+
+	site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answer := sightings.Lookup(r)
+		if answer.AI != nil && answer.AI.Verification.Result == fingerly.AIVerificationFail {
+			// It names an AI agent, and checking that claim failed.
+		}
+		// AgentUnknown, or anything else: serve as usual.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<!doctype html><title>Shop</title>")
+	})
+	log.Fatal(http.ListenAndServe(":8080", sightings.Middleware(site)))
+}
+
 func enqueue(id string, body []byte) {}

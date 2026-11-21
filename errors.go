@@ -54,6 +54,10 @@ type APIError struct {
 	// its Retry-After header, or nil when it sent none. The SDK never retries
 	// a read itself.
 	RetryAfter *int
+	// RateLimitScope names the limit a 429 answer hit, from its
+	// Fingerly-RateLimit-Scope header, such as RateLimitScopeDaily, or "" when
+	// it sent none.
+	RateLimitScope string
 	// AppleStatus is Apple's HTTP status on an apple_rejected answer from a
 	// DeviceCheck call, read from the details entry named apple_status, and 0
 	// on any other error.
@@ -96,6 +100,10 @@ var sentinelAnswers = map[error]struct {
 	ErrDeviceCheckUnavailable: {http.StatusServiceUnavailable, "device_check_unavailable"},
 	ErrEventAlreadyConsumed:   {http.StatusConflict, codeEventAlreadyConsumed},
 }
+
+// RateLimitScopeDaily is the APIError.RateLimitScope of a 429 answer refused
+// by the organization's daily allowance, which renews at the next UTC day.
+const RateLimitScopeDaily = "daily"
 
 const (
 	codeAppleRejected        = "apple_rejected"

@@ -60,3 +60,14 @@ func redactIfSet(value string) string {
 func (s EventsService) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, "fingerly.EventsService{}")
 }
+
+// Format keeps the client's key out of every fmt verb, as for EventsService.
+func (s AgentsService) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "fingerly.AgentsService{}")
+}
+
+// Format keeps the client's key, and every remembered request, out of every
+// fmt verb. A pointer receiver, since AgentSightings holds locks.
+func (s *AgentSightings) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "fingerly.AgentSightings{}")
+}

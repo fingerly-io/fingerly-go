@@ -18,9 +18,14 @@ func TestPrintingSDKValuesNeverShowsAKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := New(testSecretKey)
+	sightings, err := newAgentSightings(client, AgentSightingsOptions{ClientIP: options.ClientIP})
+	if err != nil {
+		t.Fatal(err)
+	}
 	values := map[string]any{
 		"*Proxy": proxy, "Proxy": *proxy, "*Client": client, "Client": *client,
 		"ProxyOptions": options, "*ProxyOptions": &options, "Events": client.Events,
+		"*Agents": client.Agents, "Agents": *client.Agents, "*AgentSightings": sightings,
 	}
 	for name, value := range values {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x"} {
