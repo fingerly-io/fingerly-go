@@ -149,6 +149,73 @@ func TestProxySendsOnlyVettedVisitorMetadata(t *testing.T) {
 	}
 }
 
+func TestProxyForwardsWebBotAuthHeaders(t *testing.T) {
+	signed := map[string]string{
+		"Signature":       "sig1=:dGVzdC1zaWduYXR1cmU=:",
+		"Signature-Input": `sig1=("@authority" "signature-agent");created=1735689600;keyid="k1";alg="ed25519";tag="web-bot-auth"`,
+		"Signature-Agent": `"https://chatgpt.com"`,
+	}
+	atCap := `"https://` + strings.Repeat("a", 4096-10) + `"`
+	if len(atCap) != 4096 {
+		t.Fatalf("at-cap value is %d bytes", len(atCap))
+	}
+	proxy, rec := newProxy(t, func(o *ProxyOptions) { o.AllowedOrigins = []string{"https://shop.test"} })
+	post := func(extra map[string]string) *http.Response {
+		headers := browserHeaders()
+		headers["X-Custom-Token"] = "app-header"
+		for name, value := range signed {
+			headers[name] = value
+		}
+		for name, value := range extra {
+			headers[name] = value
+		}
+		return call(proxy, http.MethodPost, proxyPath, headers, "{}")
+	}
+
+	response := post(nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control is %q", got)
+	}
+	forwarded := rec.requests[0]
+	for name, want := range signed {
+		if got := forwarded.Header.Get(name); got != want {
+			t.Errorf("%s is %q, want %q", name, got, want)
+		}
+	}
+	if got := forwarded.Header.Get("X-Fingerly-Host"); got != "example.com" {
+		t.Errorf("X-Fingerly-Host is %q", got)
+	}
+	if got := forwarded.Header.Get("X-Custom-Token"); got != "" {
+		t.Errorf("X-Custom-Token was forwarded: %q", got)
+	}
+
+	response = post(map[string]string{
+		"Signature":       "sig1=:" + strings.Repeat("A", 4097) + ":",
+		"Signature-Agent": atCap,
+	})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("oversized: status %d", response.StatusCode)
+	}
+	forwarded = rec.requests[1]
+	if got := forwarded.Header.Values("Signature"); len(got) != 0 {
+		t.Errorf("oversized Signature was forwarded: %d bytes", len(got[0]))
+	}
+	if got := forwarded.Header.Get("Signature-Input"); got != signed["Signature-Input"] {
+		t.Errorf("Signature-Input is %q", got)
+	}
+	if got := forwarded.Header.Get("Signature-Agent"); got != atCap {
+		t.Errorf("Signature-Agent at the cap was dropped: %d bytes", len(got))
+	}
+
+	preflight := call(proxy, http.MethodOptions, proxyPath, map[string]string{"Origin": "https://shop.test"}, "")
+	if got := preflight.Header.Get("Access-Control-Allow-Headers"); strings.Contains(got, "signature") {
+		t.Errorf("Access-Control-Allow-Headers = %q", got)
+	}
+}
+
 func TestProxyMarksResponsesUncacheable(t *testing.T) {
 	proxy, _ := newProxy(t, nil)
 	response := call(proxy, http.MethodPost, proxyPath, browserHeaders(), "{}")

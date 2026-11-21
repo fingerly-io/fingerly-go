@@ -55,6 +55,18 @@ var clientMetadataHeaders = []string{
 	"Sec-CH-UA-Platform",
 }
 
+// signatureHeaders are the Web Bot Auth headers an AI agent's browser signs
+// the request with, forwarded when present and at most
+// maxSignatureHeaderBytes. The API ignores a longer one, so it is dropped here
+// rather than refused.
+var signatureHeaders = []string{
+	"Signature",
+	"Signature-Input",
+	"Signature-Agent",
+}
+
+const maxSignatureHeaderBytes = 4096
+
 const (
 	corsAllowHeaders  = "content-type, x-api-key, idempotency-key, x-fingerly-sdk-platform"
 	corsExposeHeaders = "x-request-id, ratelimit-limit, ratelimit-remaining, retry-after"
@@ -518,6 +530,13 @@ func (p *Proxy) setUpstreamHeaders(
 	}
 	for _, name := range clientMetadataHeaders {
 		if value := incoming.Header.Get(name); value != "" {
+			request.Header.Set(name, value)
+		}
+	}
+	for _, name := range signatureHeaders {
+		// Repeated lines are one structured field list, as RFC 9110 joins them.
+		value := strings.Join(incoming.Header.Values(name), ", ")
+		if value != "" && len(value) <= maxSignatureHeaderBytes {
 			request.Header.Set(name, value)
 		}
 	}
