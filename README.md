@@ -166,6 +166,11 @@ Every closed set the API reports is a named string type with a constant per valu
 | `AttestSkippedReason` | `Attestation.AttestSkipped` | `AttestSkippedNotOffered`, `AttestSkippedUnsupported`, `AttestSkippedChallengeUnavailable`, `AttestSkippedKeyError`, `AttestSkippedTimeout`, `AttestSkippedBackoff`, `AttestSkippedInstallUnavailable` |
 | `EventState` | `Event.State` | `EventStatePending`, `EventStateEnriched`, `EventStateUnavailable` |
 | `AnonymityNetwork` | `Event.AnonymityNetwork` | `AnonymityNetworkTor`, `AnonymityNetworkRelay`, `AnonymityNetworkVPN`, `AnonymityNetworkProxy`, `AnonymityNetworkHosting` |
+| `VisitorKind` | `Event.VisitorKind`, `EventListParams.Kind` | `VisitorKindHuman`, `VisitorKindAIBot`, `VisitorKindAutomation`, `VisitorKindSearchCrawler` |
+| `AIPurpose` | `AIAgent.Purpose`, `EventListParams.AIPurpose` | `AIPurposeTraining`, `AIPurposeSearch`, `AIPurposeUserFetch`, `AIPurposeAgent` |
+| `AIRuntime` | `AIAgent.Runtime` | `AIRuntimeProviderCloud`, `AIRuntimeHostedBrowser`, `AIRuntimeUserDevice` |
+| `AIVerificationMethod` | `AIVerification.Method` | `AIVerificationSignature`, `AIVerificationIPList`, `AIVerificationReverseDNS`, `AIVerificationNone` |
+| `AIVerificationResult` | `AIVerification.Result` | `AIVerificationPass`, `AIVerificationFail`, `AIVerificationNotAttempted` |
 | `Environment` | `Event.Environment` | `EnvironmentProduction`, `EnvironmentStaging`, `EnvironmentDevelopment` |
 | `RiskPlatform` | `Event.Platform`, `EventRiskReport.Platform` | `RiskPlatformWeb`, `RiskPlatformIOS`, `RiskPlatformAndroid` |
 | `RiskSource` | `EventRiskReport.Source` | `RiskSourceKey`, `RiskSourceOrganization`, `RiskSourceDefault` |
@@ -176,6 +181,23 @@ Every closed set the API reports is a named string type with a constant per valu
 A value the server adds after this release still decodes, as a value no constant names. A `string` variable needs a conversion to compare, such as `fingerly.Signal(name)`.
 
 A native `Attestation` also carries `AttestSkipped` (the app's reason for sending no proof) and `Downgrade` (the report named an install an attested device owns).
+
+`Event.VisitorKind` says what sort of client made the request. When it is `VisitorKindAIBot`, `Event.AI` (`*AIAgent`) names the agent: `Name` and `Provider` (open strings, such as `ChatGPT-User` and `OpenAI`), `Purpose`, `Runtime`, `Declared`, and `Verification` with `Method` and `Result`. On every other event `AI` is nil. The identity comes from the user agent, which any client can copy, and is not verified yet: `Verification` is `AIVerificationNone` / `AIVerificationNotAttempted`. Only clients that run the browser SDK produce events, so a crawler that does not run JavaScript never appears. `EventListParams` narrows a listing by `Kind`, `AIProvider` (exact and case sensitive, as events name it) and `AIPurpose`, next to `Visitor` and `Level`:
+
+```go
+page, err := client.Events.List(ctx, &fingerly.EventListParams{
+	Kind:      fingerly.VisitorKindAIBot,
+	AIPurpose: fingerly.AIPurposeUserFetch,
+})
+if err != nil {
+	return err
+}
+for _, event := range page.Rows {
+	if event.AI != nil {
+		log.Printf("%s %s", event.AI.Provider, event.AI.Name)
+	}
+}
+```
 
 ## Verify a backend action
 
