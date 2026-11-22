@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -885,41 +886,67 @@ func (s *AgentSightings) callOnError(err error) (returned bool) {
 //	mux.Handle("/", sightings.Middleware(site))
 func (s *AgentSightings) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writer := &sightingsWriter{ResponseWriter: w}
+		writer := &sightingsWriter{ResponseWriter: w, http1: r.ProtoMajor < 2}
 		next.ServeHTTP(writer, r)
 		s.Report(r, writer.contentType())
 	})
 }
 
-// sightingsWriter notes the response's Content-Type as it is written. It
-// unwraps for http.ResponseController and passes Flush and Hijack through.
+// sniffLen is how much of a body net/http reads to sniff its type.
+const sniffLen = 512
+
+// sightingsWriter notes the Content-Type the response goes out with, sniffed
+// from the body as net/http sniffs it when the handler set none. It unwraps
+// for http.ResponseController and passes Flush, Hijack, ReadFrom, Push and
+// CloseNotify through, so routers and frameworks that look for those
+// interfaces, and wrap the writer again, keep finding them.
 type sightingsWriter struct {
 	http.ResponseWriter
+	http1 bool
+	// wroteHeader is set once the header is fixed: a final status, the first
+	// byte of body, or a flush.
 	wroteHeader bool
-	sniffed     string
-	sent        string
+	// sent is the Content-Type the header carried.
+	sent string
+	// sniff is set when net/http picks the type from the body instead: no
+	// Content-Type at all, no Content-Encoding (or Transfer-Encoding over
+	// HTTP/1), and a status with a body.
+	sniff bool
+	// head is what net/http sniffs: the first 512 bytes of body written
+	// before the first flush.
+	head    []byte
+	flushed bool
+}
+
+// fixHeader notes what the header goes out with, when net/http fixes it.
+func (w *sightingsWriter) fixHeader(status int) {
+	w.wroteHeader = true
+	header := w.Header()
+	_, typed := header["Content-Type"]
+	w.sent = header.Get("Content-Type")
+	w.sniff = !typed && header.Get("Content-Encoding") == "" &&
+		!(w.http1 && header.Get("Transfer-Encoding") != "") &&
+		status != http.StatusNoContent && status != http.StatusNotModified &&
+		(status < 100 || status > 199)
 }
 
 func (w *sightingsWriter) WriteHeader(status int) {
-	if !w.wroteHeader && status >= 200 {
-		w.wroteHeader = true
-		w.sent = w.Header().Get("Content-Type")
+	// An informational status other than 101 leaves the header open.
+	if !w.wroteHeader && (status < 100 || status > 199 || status == http.StatusSwitchingProtocols) {
+		w.fixHeader(status)
 	}
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *sightingsWriter) Write(p []byte) (int, error) {
 	if !w.wroteHeader {
-		w.wroteHeader = true
-		header := w.Header()
-		w.sent = header.Get("Content-Type")
-		// net/http sniffs a body written without a Content-Type, so the
-		// visitor saw the sniffed type; a nil value suppresses sniffing.
-		if _, set := header["Content-Type"]; !set && len(p) > 0 {
-			w.sniffed = http.DetectContentType(p)
-		}
+		w.fixHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	if w.sniff && !w.flushed && len(w.head) < sniffLen && n > 0 && n <= len(p) {
+		w.head = append(w.head, p[:min(n, sniffLen-len(w.head))]...)
+	}
+	return n, err
 }
 
 // contentType is the type the response went out with.
@@ -928,25 +955,77 @@ func (w *sightingsWriter) contentType() string {
 		// Nothing written: net/http sends an empty 200 with these headers.
 		return w.Header().Get("Content-Type")
 	}
-	if w.sent != "" {
-		return w.sent
+	if w.sniff && len(w.head) > 0 {
+		return http.DetectContentType(w.head)
 	}
-	return w.sniffed
+	return w.sent
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *sightingsWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// Flush passes through to the underlying writer, for streamed pages.
-func (w *sightingsWriter) Flush() {
-	if !w.wroteHeader {
-		w.wroteHeader = true
-		w.sent = w.Header().Get("Content-Type")
+// FlushError passes through to the underlying writer, for streamed pages, and
+// returns its error, as http.ResponseController.Flush does.
+func (w *sightingsWriter) FlushError() error {
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if !errors.Is(err, http.ErrNotSupported) {
+		if !w.wroteHeader {
+			w.fixHeader(http.StatusOK)
+		}
+		w.flushed = true
 	}
-	_ = http.NewResponseController(w.ResponseWriter).Flush()
+	return err
 }
+
+// Flush passes through to the underlying writer, for streamed pages.
+func (w *sightingsWriter) Flush() { _ = w.FlushError() }
 
 // Hijack passes through to the underlying writer, for upgraded connections.
 func (w *sightingsWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+// ReadFrom passes through to the underlying writer, which sends a file with
+// sendfile where it can. As net/http's own ReadFrom does, the body's first
+// 512 bytes go through Write first, so the type sniffed from them is noted.
+func (w *sightingsWriter) ReadFrom(src io.Reader) (int64, error) {
+	var n int64
+	if !w.wroteHeader || (w.sniff && !w.flushed && len(w.head) < sniffLen) {
+		limit := int64(sniffLen - len(w.head))
+		copied, err := io.Copy(writeOnly{w}, io.LimitReader(src, limit))
+		n += copied
+		if err != nil || copied < limit {
+			return n, err
+		}
+	}
+	if from, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		copied, err := from.ReadFrom(src)
+		return n + copied, err
+	}
+	copied, err := io.Copy(writeOnly{w.ResponseWriter}, src)
+	return n + copied, err
+}
+
+// writeOnly hides every method of a writer but Write, so io.Copy cannot call
+// ReadFrom back.
+type writeOnly struct{ io.Writer }
+
+// Push passes through to the underlying writer, for HTTP/2 server push, and
+// is http.ErrNotSupported where it has none.
+func (w *sightingsWriter) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// CloseNotify passes through to the underlying writer, for frameworks that
+// still use http.CloseNotifier, some without checking that the writer has it.
+// Where it has none, the channel never fires.
+func (w *sightingsWriter) CloseNotify() <-chan bool {
+	//lint:ignore SA1019 frameworks still call it, and assert that it is there.
+	if notifier, ok := w.ResponseWriter.(http.CloseNotifier); ok {
+		return notifier.CloseNotify()
+	}
+	return make(chan bool)
 }

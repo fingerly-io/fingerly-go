@@ -1150,6 +1150,196 @@ func TestMiddlewareKeepsFlushAndUnwrap(t *testing.T) {
 	}
 }
 
+// TestMiddlewareReportsTheTypeTheVisitorSaw serves each page through a real
+// net/http server and checks a page is reported exactly when the visitor got
+// it as text/html, however the handler wrote it.
+func TestMiddlewareReportsTheTypeTheVisitorSaw(t *testing.T) {
+	const page = "<!DOCTYPE html><html><body>hi</body></html>"
+	file := filepath.Join(t.TempDir(), "page")
+	if err := os.WriteFile(file, []byte(page), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handlers := map[string]http.HandlerFunc{
+		"/sniffed": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, page)
+		},
+		"/status-first": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, page)
+		},
+		"/not-found": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, page)
+		},
+		// A template writes its text in pieces; net/http sniffs what it
+		// buffered, not the first piece alone.
+		"/pieces": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "\n")
+			_, _ = io.WriteString(w, page)
+		},
+		"/twice": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, page)
+		},
+		"/encoded": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Encoding", "identity-ish")
+			_, _ = io.WriteString(w, page)
+		},
+		"/flushed-first": func(w http.ResponseWriter, _ *http.Request) {
+			w.(http.Flusher).Flush()
+			_, _ = io.WriteString(w, page)
+		},
+		"/no-content": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		},
+		"/early-hints": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusEarlyHints)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		},
+		"/copied": func(w http.ResponseWriter, _ *http.Request) {
+			f, err := os.Open(file)
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close()
+			_, _ = io.Copy(w, f)
+		},
+		"/served-file": func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, file)
+		},
+	}
+	h := newHarness(t, nil)
+	site := http.NewServeMux()
+	for path, handler := range handlers {
+		site.Handle(path, handler)
+	}
+	server := httptest.NewServer(h.Middleware(site))
+	defer server.Close()
+
+	saw := map[string]bool{}
+	for path := range handlers {
+		request, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		request.Header.Set("User-Agent", path)
+		request.Header.Set("X-Test-IP", "198.51.100.1")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		saw[path] = mediaType(response.Header.Get("Content-Type")) == "text/html"
+	}
+	reported := map[string]bool{}
+	for _, item := range h.pendingItems() {
+		reported[item.UserAgent] = true
+	}
+	for path, html := range saw {
+		if reported[path] != html {
+			t.Errorf("%s: the visitor got text/html %v, reported %v", path, html, reported[path])
+		}
+	}
+	for _, path := range []string{"/sniffed", "/pieces", "/status-first", "/not-found", "/copied"} {
+		if !saw[path] {
+			t.Errorf("%s: net/http did not sniff text/html; the case tests nothing", path)
+		}
+	}
+}
+
+// fancyWriter is an underlying writer with every optional interface, each
+// recording that it was reached.
+type fancyWriter struct {
+	*httptest.ResponseRecorder
+	flushErr error
+	reached  map[string]bool
+}
+
+func (w *fancyWriter) FlushError() error { w.reached["flush"] = true; return w.flushErr }
+func (w *fancyWriter) Push(string, *http.PushOptions) error {
+	w.reached["push"] = true
+	return nil
+}
+
+func (w *fancyWriter) CloseNotify() <-chan bool { w.reached["closenotify"] = true; return nil }
+func (w *fancyWriter) ReadFrom(src io.Reader) (int64, error) {
+	w.reached["readfrom"] = true
+	return io.Copy(w.ResponseRecorder, src)
+}
+
+func TestMiddlewareKeepsEveryWriterInterface(t *testing.T) {
+	h := newHarness(t, nil)
+	broken := errors.New("the client went away")
+	underlying := &fancyWriter{ResponseRecorder: httptest.NewRecorder(), flushErr: broken, reached: map[string]bool{}}
+	handler := h.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		// Frameworks assert these without checking, gin's Stream for one.
+		_ = w.(http.CloseNotifier).CloseNotify()
+		if err := w.(http.Pusher).Push("/app.css", nil); err != nil {
+			t.Errorf("Push: %v", err)
+		}
+		if err := http.NewResponseController(w).Flush(); !errors.Is(err, broken) {
+			t.Errorf("ResponseController.Flush returned %v, not the writer's error", err)
+		}
+		// A reader without WriteTo, so io.Copy asks the writer to ReadFrom.
+		_, _ = io.Copy(w, struct{ io.Reader }{strings.NewReader(strings.Repeat("x", 2*sniffLen))})
+	}))
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, name := range []string{"closenotify", "push", "flush", "readfrom"} {
+		if !underlying.reached[name] {
+			t.Errorf("%s did not reach the underlying writer", name)
+		}
+	}
+	if underlying.Body.Len() != 2*sniffLen {
+		t.Fatalf("wrote %d bytes", underlying.Body.Len())
+	}
+	if len(h.pendingItems()) != 1 {
+		t.Fatal("the page was not reported")
+	}
+
+	// A writer without them: Push says so, CloseNotify never fires.
+	plain := h.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := w.(http.Pusher).Push("/app.css", nil); !errors.Is(err, http.ErrNotSupported) {
+			t.Errorf("Push on a writer without it returned %v", err)
+		}
+		select {
+		case <-w.(http.CloseNotifier).CloseNotify():
+			t.Error("CloseNotify fired")
+		default:
+		}
+	}))
+	plain.ServeHTTP(struct{ http.ResponseWriter }{httptest.NewRecorder()}, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestMiddlewareKeepsWebSocketUpgrades(t *testing.T) {
+	h := newHarness(t, nil)
+	server := httptest.NewServer(h.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buffered, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nhello")
+		_ = buffered.Flush()
+	})))
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/ws", nil)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusSwitchingProtocols || string(body) != "hello" {
+		t.Fatalf("got %d %q", response.StatusCode, body)
+	}
+}
+
 func TestSightingsDecodesTheFixture(t *testing.T) {
 	api := newSightingsAPI(t)
 	api.setRespond(respondRawFixture(http.StatusOK, responseFixture(t, "agent_sightings")).toRespond())
