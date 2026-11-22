@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -1207,3 +1208,79 @@ func TestSightingsMapsA429WithItsScope(t *testing.T) {
 		t.Fatalf("err %#v", err)
 	}
 }
+
+func TestAPanickingClientIPNeverBreaksTheResponse(t *testing.T) {
+	h := newHarness(t, func(options *AgentSightingsOptions) {
+		options.ClientIP = func(*http.Request) string { panic("the host's bug") }
+	})
+	site := h.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answer := h.Lookup(r); answer != AgentUnknown {
+			t.Errorf("answer %+v", answer)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "page")
+	}))
+	w := httptest.NewRecorder()
+	site.ServeHTTP(w, served("ua", "198.51.100.1", nil))
+	if w.Code != http.StatusOK || w.Body.String() != "page" {
+		t.Fatalf("served %d %q", w.Code, w.Body.String())
+	}
+	if len(h.pendingItems()) != 0 {
+		t.Fatal("reported a request whose address did not resolve")
+	}
+	if h.errors.count() != 1 || !errors.Is(h.errors.errs[0], errClientIPPanicked) {
+		t.Fatalf("errors %v", h.errors.errs)
+	}
+}
+
+func TestAPanickingOnErrorNeverEndsTheProcess(t *testing.T) {
+	api := newSightingsAPI(t)
+	api.setRespond(answerStatus(http.StatusUnprocessableEntity, "invalid_request", nil))
+	var buffer strings.Builder
+	var bufferMu sync.Mutex
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		bufferMu.Lock()
+		defer bufferMu.Unlock()
+		return buffer.Write(p)
+	}), nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	client := New(testSecretKey, WithEndpoint(api.server.URL), WithAllowInsecureLoopback())
+	sightings, err := NewAgentSightings(client, AgentSightingsOptions{
+		ClientIP: testIP,
+		OnError:  func(error) { panic("the host's bug") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sightings.Close()
+	// 200 waiting wakes the background flusher at once; its 422 reaches OnError
+	// on the flusher's goroutine, where an unrecovered panic ends the process.
+	for i := range maxSightingsItems {
+		sightings.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(api.sent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	api.setRespond(nil)
+	for i := range maxSightingsItems {
+		sightings.Report(served("again"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	for len(api.sent()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(api.sent()) != 2 {
+		t.Fatalf("the flusher stopped after OnError panicked: %d batches", len(api.sent()))
+	}
+	bufferMu.Lock()
+	defer bufferMu.Unlock()
+	if !strings.Contains(buffer.String(), "OnError panicked") {
+		t.Fatalf("logged %q", buffer.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

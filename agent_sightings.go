@@ -79,8 +79,10 @@ type AgentSightingsOptions struct {
 
 	// OnError is called for a report the API refused or could not take, at
 	// most once a minute per kind of failure, and for a ClientIP that returned
-	// no valid address. Leave it nil to log one line through slog.Default().
-	// The error never carries a key, an address, a user agent or any header.
+	// no valid address or panicked. Leave it nil to log one line through
+	// slog.Default(). The error never carries a key, an address, a user agent
+	// or any header. It may be called from the background flusher and from
+	// request goroutines at once; a panic in it is recovered and logged.
 	OnError func(error)
 }
 
@@ -298,9 +300,14 @@ func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 	if len(userAgent) > maxSightingHeader {
 		return pendingSighting{}, false
 	}
-	address, ok := canonicalIP(s.clientIP(r))
+	resolved, panicked := s.resolveClientIP(r)
+	address, ok := canonicalIP(resolved)
 	if !ok {
-		s.logLimited("client_ip", errNoClientIP)
+		if panicked {
+			s.logLimited("client_ip", errClientIPPanicked)
+		} else {
+			s.logLimited("client_ip", errNoClientIP)
+		}
 		return pendingSighting{}, false
 	}
 	item := AgentSighting{
@@ -321,6 +328,23 @@ func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 		size: len(item.UserAgent) + len(item.ClientIP) + len(item.Host) + len(item.Method) +
 			len(item.Signature) + len(item.SignatureInput) + len(item.SignatureAgent),
 	}, true
+}
+
+// errClientIPPanicked reports a ClientIP callback that panicked. The request
+// it was resolving is served as usual and not reported.
+var errClientIPPanicked = errors.New("fingerly: the client IP callback panicked; the request was not reported")
+
+// resolveClientIP calls the ClientIP callback. A panic in it is the host's
+// bug, but Report runs after the response was written and Lookup promises
+// never to fail, so it must not turn a served page into a broken connection:
+// it resolves as no address instead.
+func (s *AgentSightings) resolveClientIP(r *http.Request) (address string, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			address, panicked = "", true
+		}
+	}()
+	return s.clientIP(r), false
 }
 
 // signatureHeader reads one Web Bot Auth header as the proxy forwards it:
@@ -776,10 +800,26 @@ func (s *AgentSightings) emit(err error) {
 		return
 	}
 	if s.onError != nil {
-		s.onError(err)
+		if s.callOnError(err) {
+			return
+		}
+		slog.Default().Warn("fingerly agent sightings: OnError panicked", "error", err.Error())
 		return
 	}
 	slog.Default().Warn("fingerly agent sightings: report failed", "error", err.Error())
+}
+
+// callOnError calls OnError and reports whether it returned. It runs on the
+// background flusher too, where a panic would end the whole process, so a
+// panic is recovered and the failure logged instead.
+func (s *AgentSightings) callOnError(err error) (returned bool) {
+	defer func() {
+		if recover() != nil {
+			returned = false
+		}
+	}()
+	s.onError(err)
+	return true
 }
 
 // Middleware reports every response its rules cover after next has written
