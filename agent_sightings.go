@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // The bounds and timings every server SDK keeps for agent sightings.
@@ -303,11 +304,13 @@ func canonicalIP(value string) (string, bool) {
 }
 
 // sightingOf reads what is reported for r, or reports false when r is not
-// reportable: a user agent over 4096 bytes or an address that does not
-// resolve.
+// reportable: a user agent or a method over 4096 bytes, or an address that
+// does not resolve. Every length is measured as the API measures it, on the
+// field as sent; one field over its bound would get the whole batch refused.
 func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 	userAgent := r.Header.Get("User-Agent")
-	if len(userAgent) > maxSightingHeader {
+	sentAgent, method := asSent(userAgent), asSent(r.Method)
+	if len(sentAgent) > maxSightingHeader || len(method) > maxSightingHeader {
 		return pendingSighting{}, false
 	}
 	resolved, panicked := s.resolveClientIP(r)
@@ -323,23 +326,27 @@ func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 	// net/http takes a Host up to its 1 MB header limit, and waiting reports
 	// must stay small: a Host over 4096 bytes is left out, as the signature
 	// headers are.
-	host := r.Host
+	host := asSent(r.Host)
 	if len(host) > maxSightingHeader {
 		host = ""
 	}
+	_, signature := signatureHeader(r, "Signature")
+	_, signatureInput := signatureHeader(r, "Signature-Input")
+	signatureAgent, sentSignatureAgent := signatureHeader(r, "Signature-Agent")
 	item := AgentSighting{
-		UserAgent:      userAgent,
+		UserAgent:      sentAgent,
 		ClientIP:       address,
 		Host:           host,
-		Method:         r.Method,
-		Signature:      signatureHeader(r, "Signature"),
-		SignatureInput: signatureHeader(r, "Signature-Input"),
-		SignatureAgent: signatureHeader(r, "Signature-Agent"),
+		Method:         method,
+		Signature:      signature,
+		SignatureInput: signatureInput,
+		SignatureAgent: sentSignatureAgent,
 		Count:          1,
 	}
 	signed := item.Signature != "" && item.SignatureInput != ""
 	return pendingSighting{
-		key:    sightingKey(userAgent, address, item.SignatureAgent, signed),
+		// The key hashes the headers as received.
+		key:    sightingKey(userAgent, address, signatureAgent, signed),
 		signed: signed,
 		item:   item,
 		size: len(item.UserAgent) + len(item.ClientIP) + len(item.Host) + len(item.Method) +
@@ -365,14 +372,35 @@ func (s *AgentSightings) resolveClientIP(r *http.Request) (address string, panic
 }
 
 // signatureHeader reads one Web Bot Auth header as the proxy forwards it:
-// repeated lines joined as one field list, and left out over 4096 bytes. An
-// empty or whitespace-only header, repeated empty lines included, is absent.
-func signatureHeader(r *http.Request, name string) string {
+// repeated lines joined as one field list, and left out over 4096 bytes as
+// sent. An empty or whitespace-only header, repeated empty lines included, is
+// absent. It returns the header as received, for the key, and as sent.
+func signatureHeader(r *http.Request, name string) (received, sent string) {
 	value := strings.Join(r.Header.Values(name), ", ")
-	if len(value) > maxSightingHeader || strings.Trim(value, " \t,") == "" {
-		return ""
+	sent = asSent(value)
+	if len(sent) > maxSightingHeader || strings.Trim(value, " \t,") == "" {
+		return "", ""
 	}
-	return value
+	return value, sent
+}
+
+// asSent is value as encoding/json sends it and the API reads it back: each
+// byte that is not part of valid UTF-8 becomes U+FFFD, three bytes.
+func asSent(value string) string {
+	if utf8.ValidString(value) {
+		return value
+	}
+	var out strings.Builder
+	for i := 0; i < len(value); {
+		r, size := utf8.DecodeRuneInString(value[i:])
+		if r == utf8.RuneError && size == 1 {
+			out.WriteString("�")
+		} else {
+			out.WriteString(value[i : i+size])
+		}
+		i += size
+	}
+	return out.String()
 }
 
 // Lookup returns what the API last answered for a request like r, or

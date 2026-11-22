@@ -505,6 +505,64 @@ func TestOversizedHeadersAreLeftOut(t *testing.T) {
 	}
 }
 
+// sentLen is a field's length as the API measures it: decoded from the JSON
+// the SDK sends.
+func sentLen(t *testing.T, value string) int {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded string
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return len(decoded)
+}
+
+func TestFieldsAreBoundedAsTheAPIMeasuresThem(t *testing.T) {
+	h := newHarness(t, nil)
+	// Each byte that is not UTF-8 is sent as U+FFFD, three bytes: 4096
+	// received bytes became 8096, and the API refused the whole batch.
+	invalid := strings.Repeat("\xff", 2000) + strings.Repeat("a", maxSightingHeader-2000)
+	if _, ok := h.sightingOf(served(invalid, "198.51.100.1", nil)); ok {
+		t.Fatal("a user agent over 4096 bytes as sent was reported")
+	}
+	longMethod := served("ua", "198.51.100.1", nil)
+	longMethod.Method = strings.Repeat("M", maxSightingHeader+1)
+	if _, ok := h.sightingOf(longMethod); ok {
+		t.Fatal("a method over 4096 bytes was reported")
+	}
+
+	r := served("bot \xff", "198.51.100.1", map[string]string{
+		"Signature":       "sig1=:" + invalid + ":",
+		"Signature-Input": "sig1=()",
+		"Signature-Agent": "\"https://agent.example\"\xfe",
+	})
+	r.Host = invalid
+	sighting, ok := h.sightingOf(r)
+	if !ok {
+		t.Fatal("a short user agent with a stray byte was not reported")
+	}
+	item := sighting.item
+	if item.UserAgent != "bot �" || item.Host != "" || item.Signature != "" ||
+		item.SignatureAgent != "\"https://agent.example\"�" {
+		t.Fatalf("item %+v", item)
+	}
+	for _, field := range []string{item.UserAgent, item.Host, item.Method, item.Signature, item.SignatureInput, item.SignatureAgent} {
+		if sentLen(t, field) != len(field) || len(field) > maxSightingHeader {
+			t.Fatalf("a field is %d bytes as sent", sentLen(t, field))
+		}
+	}
+	if sighting.size != len(item.UserAgent)+len(item.ClientIP)+len(item.Method)+len(item.SignatureInput)+len(item.SignatureAgent) {
+		t.Fatal("the batch size is not counted on the fields as sent")
+	}
+	// The key hashes the headers as received, as the contract says.
+	if want, _ := AgentSightingKey("bot \xff", "198.51.100.1", "\"https://agent.example\"\xfe", false); sighting.key != want {
+		t.Fatal("the key is not over the headers as received")
+	}
+}
+
 func TestBlankSignatureHeadersAreAbsent(t *testing.T) {
 	h := newHarness(t, nil)
 	blank := served("ua", "198.51.100.1", map[string]string{
