@@ -1564,8 +1564,8 @@ func TestShutdownGivesUpWhenItsContextEnds(t *testing.T) {
 	}
 	select {
 	case <-sightings.done:
-	default:
-		t.Fatal("the flusher is still running")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the flusher is still running: its batch was not abandoned")
 	}
 	if err := sightings.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a second Shutdown returned %v, not the first one's result", err)
@@ -1620,6 +1620,83 @@ func TestShutdownAndCloseAreSafeConcurrentlyAndAfterwards(t *testing.T) {
 	}
 	if total == 0 {
 		t.Fatal("Close sent nothing")
+	}
+}
+
+// startedSightings is an AgentSightings with its background flusher, whose
+// waits for a flush in flight are short.
+func startedSightings(t *testing.T, api *sightingsAPI, onError func(error)) *AgentSightings {
+	t.Helper()
+	client := New(testSecretKey, WithEndpoint(api.server.URL), WithAllowInsecureLoopback())
+	sightings, err := newAgentSightings(client, AgentSightingsOptions{ClientIP: testIP, OnError: onError})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sightings.flushWait = 200 * time.Millisecond
+	sightings.start()
+	return sightings
+}
+
+func TestShutdownKeepsItsDeadlineWhileOnErrorBlocks(t *testing.T) {
+	api := newSightingsAPI(t)
+	api.setRespond(answerStatus(http.StatusUnprocessableEntity, "invalid_request", nil))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	sightings := startedSightings(t, api, func(error) {
+		entered <- struct{}{}
+		<-release
+	})
+	for i := range maxSightingsItems {
+		sightings.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flusher never reported the 422")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() { returned <- sightings.Shutdown(ctx) }()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown waited past its context for a blocked OnError")
+	}
+}
+
+func TestCloseFromOnErrorReturns(t *testing.T) {
+	api := newSightingsAPI(t)
+	api.setRespond(answerStatus(http.StatusUnauthorized, "unauthorized", nil))
+	returned := make(chan struct{})
+	var sightings *AgentSightings
+	var once sync.Once
+	ready := make(chan struct{})
+	sightings = startedSightings(t, api, func(error) {
+		<-ready
+		// A host that stops reporting once the key is refused.
+		once.Do(func() {
+			_ = sightings.Close()
+			close(returned)
+		})
+	})
+	close(ready)
+	for i := range maxSightingsItems {
+		sightings.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close called from OnError never returned")
+	}
+	select {
+	case <-sightings.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the flusher did not stop")
 	}
 }
 

@@ -506,8 +506,10 @@ func (s *AgentSightings) Flush(ctx context.Context) {
 
 // Shutdown stops the background flusher and sends what is waiting, giving up
 // when ctx is done: a batch in flight is then abandoned and what still waits
-// is not sent. Pass it the context you give http.Server.Shutdown, after the
-// server has stopped. Requests served afterwards are not reported.
+// is not sent. Like Flush, it waits at most 6 seconds for the flusher's batch
+// in flight, and sends nothing when that one is still running, so a call from
+// OnError returns too. Pass it the context you give http.Server.Shutdown,
+// after the server has stopped. Requests served afterwards are not reported.
 //
 // It returns ctx's error when it gave up, and nil otherwise; what the API
 // refused is reported to OnError, as always. It is safe to call more than
@@ -520,20 +522,35 @@ func (s *AgentSightings) Shutdown(ctx context.Context) error {
 
 func (s *AgentSightings) shutdown(ctx context.Context) error {
 	close(s.stop)
+	// Returning abandons the flusher's batch in flight, if any.
 	defer s.cancelLoop()
 	if s.started() {
+		// The flusher starts no batch now, and the one in flight has its own
+		// deadline. Wait for it as Flush waits for a flush in flight, at most
+		// 6 seconds and never past ctx: the flusher may be inside OnError,
+		// which may block, or call Shutdown or Close itself.
+		wait := time.NewTimer(s.flushWait)
+		defer wait.Stop()
 		select {
 		case <-s.done:
+		case <-wait.C:
+			s.markClosed()
+			return ctx.Err()
 		case <-ctx.Done():
-			s.cancelLoop()
-			<-s.done
+			s.markClosed()
+			return ctx.Err()
 		}
 	}
+	s.markClosed()
+	s.Flush(ctx)
+	return ctx.Err()
+}
+
+// markClosed stops recording requests.
+func (s *AgentSightings) markClosed() {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	s.Flush(ctx)
-	return ctx.Err()
 }
 
 // Close is Shutdown without a deadline of its own: it stops the background
