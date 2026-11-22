@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.0
+
+- Added `AgentSightings`, which reports the requests your server served so
+  that AI crawlers and fetchers that never run a page's JavaScript are seen,
+  and remembers the answers so `Lookup` can say in memory what sent a request
+  (`AgentAnswer`, or `AgentUnknown` for "serve as usual"). Mount its
+  `Middleware` on any net/http router, or call `Report` yourself. Reports go
+  in batches from one background goroutine and never delay a response;
+  waiting reports are capped at 1000 (`Dropped` counts the rest) and
+  remembered answers at `CacheSize`. `Flush(ctx)` sends what is waiting
+  before a serverless invocation ends, and `Shutdown(ctx)` or `Close()` stop
+  it at shutdown, with `Shutdown` giving up when its context is done. A panic
+  in the `ClientIP` or `OnError` callback is recovered and reported, and a
+  `Retry-After` over a day waits a day.
+- `AgentSightings.Middleware` reports a page by the `Content-Type` net/http
+  sends: one written without a type is sniffed from its first 512 bytes, as
+  net/http sniffs it, also after an explicit `WriteHeader`, and not at all
+  under a `Content-Encoding`. The writer it hands your handler also keeps
+  `io.ReaderFrom`, `http.Pusher` and `http.CloseNotifier` (frameworks that
+  assert it, such as gin's `Stream`, no longer panic), and
+  `http.ResponseController.Flush` returns the underlying writer's error.
+- `AgentSightings.Shutdown` keeps its deadline, and `Close` returns, when
+  `OnError` blocks or calls either of them itself.
+- `AgentSightings` leaves out a `Host` over 4096 bytes, so waiting reports
+  stay small, and does not report a request whose method is over 4096 bytes.
+  Every length is measured as the API measures it, with each byte that is not
+  UTF-8 counted as the three bytes of U+FFFD it is sent as, so no report holds
+  an item the API would refuse the whole batch for.
+- `Client.Agents.Sightings` answers an item that does not decode as
+  `AgentUnknown`, in its place, instead of failing the whole answer.
+- Added `VisitorKindUnknown`, the answer the API gives a reported request it
+  could not use: TTL 0, so it is never remembered and `Lookup` answers it
+  `AgentUnknown`, while the other requests of the batch are answered as
+  usual. A `422` now means no request in the batch was usable.
+- `APIError.RetryAfter` holds a `Retry-After` too large for an `int` at the
+  largest `int` instead of none, so a sightings `429` with one waits a day.
+- `Events.List` sends `From` and `To` with their fractions of a second, so the
+  exclusive `To` no longer leaves out the events of its last second.
+- Added `Client.Agents.Sightings(ctx, items)`, the call underneath, with
+  `AgentSighting`, `AgentSightingsAnswer` and `AgentSightingKey`, and
+  `APIError.RateLimitScope` with `RateLimitScopeDaily` for a `429` from the
+  daily allowance.
+- Added `Event.AI`, the AI agent behind an event whose `VisitorKind` is
+  `VisitorKindAIBot`, as an `AIAgent` with its operator, `AIPurpose`,
+  `AIRuntime` and `AIVerification` (`AIVerificationMethod` and
+  `AIVerificationResult`), and the `Kind`, `AIProvider` and `AIPurpose`
+  filters on `EventListParams`.
+- The proxy forwards the Web Bot Auth `Signature`, `Signature-Input` and
+  `Signature-Agent` headers, each up to 4096 bytes.
+- Added `SignalAISpoofed` and `SignalIdentityObfuscated`.
+- Breaking: `Event.VisitorKind` is a `VisitorKind`, with a constant per
+  value; comparing with a constant or a string literal is unchanged. The
+  `SignalVPNTimezone` constant is removed, since the server no longer reports
+  it.
+- The README, `DeviceCheckService` and its example describe one read and one
+  write token per identification: a check-then-mark flow reads and writes on
+  the same request ID.
+
 ## 0.4.1
 
 - Each `AttestSkippedReason` constant says when the iOS and Android SDKs send

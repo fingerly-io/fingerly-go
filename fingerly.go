@@ -17,7 +17,7 @@ import (
 )
 
 // Version is the SDK version, reported to the API on every request.
-const Version = "0.4.1"
+const Version = "0.5.0"
 
 const (
 	defaultTimeout    = 10 * time.Second
