@@ -563,6 +563,25 @@ func TestFieldsAreBoundedAsTheAPIMeasuresThem(t *testing.T) {
 	}
 }
 
+func TestAnItemThatDoesNotDecodeIsUnknownInItsPlace(t *testing.T) {
+	h := newHarness(t, nil)
+	h.api.setRespond(respondRawFixture(http.StatusOK, json.RawMessage(`{"rules_version":"r","items":[
+		{"ttl":60,"visitor_kind":"ai_bot","agent":"GPTBot"},
+		{"ttl":"sixty","visitor_kind":7,"ai":"yes"},
+		{"ttl":60,"visitor_kind":"human"}]}`)).toRespond())
+	first, second, third := served("first", "198.51.100.1", nil), served("second", "198.51.100.1", nil), served("third", "198.51.100.1", nil)
+	for _, r := range []*http.Request{first, second, third} {
+		h.Report(r, "text/html")
+	}
+	h.Flush(context.Background())
+	if h.errors.count() != 0 || len(h.pendingItems()) != 0 {
+		t.Fatalf("logged %d, pending %d", h.errors.count(), len(h.pendingItems()))
+	}
+	if h.Lookup(first).Agent != "GPTBot" || h.Lookup(second) != AgentUnknown || h.Lookup(third).VisitorKind != VisitorKindHuman {
+		t.Fatal("the answers did not keep their places")
+	}
+}
+
 func TestBlankSignatureHeadersAreAbsent(t *testing.T) {
 	h := newHarness(t, nil)
 	blank := served("ua", "198.51.100.1", map[string]string{

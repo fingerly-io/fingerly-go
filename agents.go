@@ -46,7 +46,8 @@ type AgentSightingsAnswer struct {
 	// RulesVersion names the server's classification rules. When it changes,
 	// every remembered answer is stale.
 	RulesVersion string `json:"rules_version"`
-	// Items holds one answer per reported request, in the same order.
+	// Items holds one answer per reported request, in the same order. An
+	// item that does not decode is AgentUnknown, in its place.
 	Items []AgentAnswer `json:"items"`
 	// Raw is the response body exactly as it arrived.
 	Raw json.RawMessage `json:"-"`
@@ -106,10 +107,24 @@ func (s *AgentsService) Sightings(ctx context.Context, items []AgentSighting) (*
 	if err != nil {
 		return nil, err
 	}
-	var answer AgentSightingsAnswer
-	if err := json.Unmarshal(body, &answer); err != nil {
+	var wire struct {
+		RulesVersion string            `json:"rules_version"`
+		Items        []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("fingerly: decode sightings answer: %w", err)
 	}
-	answer.Raw = body
+	answer := AgentSightingsAnswer{RulesVersion: wire.RulesVersion, Raw: body}
+	if wire.Items != nil {
+		answer.Items = make([]AgentAnswer, len(wire.Items))
+	}
+	for i, raw := range wire.Items {
+		// An item that does not decode is AgentUnknown, in its place, so the
+		// others still answer their requests.
+		var item AgentAnswer
+		if json.Unmarshal(raw, &item) == nil {
+			answer.Items[i] = item
+		}
+	}
 	return &answer, nil
 }
