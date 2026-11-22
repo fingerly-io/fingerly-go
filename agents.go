@@ -27,6 +27,7 @@ type AgentSighting struct {
 	// never a forwarded list.
 	ClientIP string `json:"client_ip"`
 	// Host is the Host the request was sent to, which a signing agent signs.
+	// AgentSightings leaves out one over 4096 bytes.
 	Host string `json:"host,omitempty"`
 	// Method is the request method; the API reads an empty one as GET.
 	Method string `json:"method,omitempty"`

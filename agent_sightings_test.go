@@ -494,6 +494,15 @@ func TestOversizedHeadersAreLeftOut(t *testing.T) {
 	if want, _ := AgentSightingKey("ua", "198.51.100.1", "", false); sighting.key != want {
 		t.Fatal("the key counts a header that was left out")
 	}
+
+	// net/http takes a Host up to its 1 MB header limit: a thousand waiting
+	// would hold a gigabyte.
+	hugeHost := served("ua", "198.51.100.1", nil)
+	hugeHost.Host = strings.Repeat("a", 1<<20)
+	sighting, ok = h.sightingOf(hugeHost)
+	if !ok || sighting.item.Host != "" || sighting.size > 64 {
+		t.Fatalf("a 1 MB Host was kept: %d bytes", sighting.size)
+	}
 }
 
 func TestBlankSignatureHeadersAreAbsent(t *testing.T) {

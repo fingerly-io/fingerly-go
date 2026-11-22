@@ -320,10 +320,17 @@ func (s *AgentSightings) sightingOf(r *http.Request) (pendingSighting, bool) {
 		}
 		return pendingSighting{}, false
 	}
+	// net/http takes a Host up to its 1 MB header limit, and waiting reports
+	// must stay small: a Host over 4096 bytes is left out, as the signature
+	// headers are.
+	host := r.Host
+	if len(host) > maxSightingHeader {
+		host = ""
+	}
 	item := AgentSighting{
 		UserAgent:      userAgent,
 		ClientIP:       address,
-		Host:           r.Host,
+		Host:           host,
 		Method:         r.Method,
 		Signature:      signatureHeader(r, "Signature"),
 		SignatureInput: signatureHeader(r, "Signature-Input"),
