@@ -582,6 +582,36 @@ func TestAnItemThatDoesNotDecodeIsUnknownInItsPlace(t *testing.T) {
 	}
 }
 
+func TestAnItemTheAPICouldNotUseLeavesOnlyItselfUnknown(t *testing.T) {
+	h := newHarness(t, nil)
+	h.api.setRespond(func(w http.ResponseWriter, batch []AgentSighting) {
+		items := make([]AgentAnswer, len(batch))
+		for i, item := range batch {
+			items[i] = AgentAnswer{TTL: 60, VisitorKind: VisitorKindHuman, Agent: item.UserAgent}
+			if item.UserAgent == "unusable" {
+				items[i] = AgentAnswer{TTL: 0, VisitorKind: VisitorKindUnknown}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AgentSightingsAnswer{RulesVersion: "r", Items: items})
+	})
+	first, unusable, third := served("first", "198.51.100.1", nil), served("unusable", "198.51.100.1", nil), served("third", "198.51.100.1", nil)
+	for _, r := range []*http.Request{first, unusable, third} {
+		h.Report(r, "text/html")
+	}
+	h.Flush(context.Background())
+	h.Flush(context.Background())
+	if sent := h.api.sent(); len(sent) != 1 || len(sent[0]) != 3 {
+		t.Fatalf("sent %d batches", len(sent))
+	}
+	if h.errors.count() != 0 || h.Dropped() != 0 || len(h.pendingItems()) != 0 || h.cache.Len() != 2 {
+		t.Fatalf("logged %d, dropped %d, pending %d, cached %d", h.errors.count(), h.Dropped(), len(h.pendingItems()), h.cache.Len())
+	}
+	if h.Lookup(first).Agent != "first" || h.Lookup(unusable) != AgentUnknown || h.Lookup(third).Agent != "third" {
+		t.Fatal("the usable answers were not kept in their places")
+	}
+}
+
 func TestBlankSignatureHeadersAreAbsent(t *testing.T) {
 	h := newHarness(t, nil)
 	blank := served("ua", "198.51.100.1", map[string]string{

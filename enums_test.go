@@ -129,6 +129,7 @@ func TestEnumWireValues(t *testing.T) {
 		{string(VisitorKindAIBot), "ai_bot"},
 		{string(VisitorKindAutomation), "automation"},
 		{string(VisitorKindSearchCrawler), "search_crawler"},
+		{string(VisitorKindUnknown), "unknown"},
 		{string(AIPurposeTraining), "training"},
 		{string(AIPurposeSearch), "search"},
 		{string(AIPurposeUserFetch), "user_fetch"},

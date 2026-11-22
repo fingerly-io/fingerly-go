@@ -60,10 +60,13 @@ type AgentSightingsAnswer struct {
 type AgentAnswer struct {
 	// TTL is how many seconds this answer may be reused for the exact same
 	// user agent, address and Signature-Agent; 0 for a signed request, which
-	// is checked every time.
+	// is checked every time, and for a request the server could not use.
 	TTL int `json:"ttl"`
 	// VisitorKind is VisitorKindHuman, VisitorKindAIBot, VisitorKindAutomation
-	// or VisitorKindSearchCrawler, and "" in AgentUnknown.
+	// or VisitorKindSearchCrawler; VisitorKindUnknown for a request the
+	// server could not use (a field over 4096 bytes, an address that is not
+	// one literal, a count over 1000000), which is never remembered; and ""
+	// in AgentUnknown.
 	VisitorKind VisitorKind `json:"visitor_kind"`
 	// Agent is the agent's name where the server knows it, such as GPTBot or
 	// Googlebot. Empty for a person's browser.

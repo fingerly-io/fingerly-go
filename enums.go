@@ -210,6 +210,10 @@ const (
 	VisitorKindAIBot         VisitorKind = "ai_bot"
 	VisitorKindAutomation    VisitorKind = "automation"
 	VisitorKindSearchCrawler VisitorKind = "search_crawler"
+	// VisitorKindUnknown is only in an agent sightings answer: a request the
+	// server could not use; TTL 0, never remembered. An event never carries
+	// it.
+	VisitorKindUnknown VisitorKind = "unknown"
 )
 
 // AIPurpose is what an AI agent's operator says its traffic is for.

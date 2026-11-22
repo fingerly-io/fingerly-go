@@ -779,6 +779,7 @@ func (s *AgentSightings) settle(
 			s.pausedUntil = now.Add(sightingsAuthPause)
 			return false, s.limited(now, "auth", err)
 		case http.StatusUnprocessableEntity:
+			// No item in the batch was usable: an SDK bug, not a transient.
 			return false, s.limited(now, "invalid", err)
 		default:
 			return false, s.limited(now, "status", err)
