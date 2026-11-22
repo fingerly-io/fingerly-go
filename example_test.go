@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	fingerly "github.com/fingerly-io/fingerly-go"
@@ -85,16 +87,17 @@ func ExampleAPIError() {
 	fmt.Println(verdict)
 }
 
-// A once-per-device free trial on iOS spends two identifications, because
-// Apple treats each DeviceCheck token as single-use: read the bits on the
-// identification that asks for the trial, record the grant in your own data,
-// then write the bit on the device's next identification.
+// A once-per-device free trial on iOS reads and writes on the identification
+// that asks for the trial, because it holds a read token and a write token:
+// read the bits, record the grant in your own data, then write the bit with
+// the same request id.
 func ExampleDeviceCheckService_Query() {
 	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
 	ctx := context.Background()
+	requestID := "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4"
 
-	// 1. The identification that asks for the trial.
-	bits, err := client.DeviceCheck.Query(ctx, "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4")
+	// 1. Read the bits.
+	bits, err := client.DeviceCheck.Query(ctx, requestID)
 	switch {
 	case errors.Is(err, fingerly.ErrDeviceCheckNotHeld), errors.Is(err, fingerly.ErrDeviceCheckSpent):
 		// No answer, not a verdict: decide on your own records alone.
@@ -107,8 +110,8 @@ func ExampleDeviceCheckService_Query() {
 	// 2. Grant the trial and record it in your own data, with the device
 	// not yet marked.
 
-	// 3. The next identification from that install marks the device.
-	if _, err := client.DeviceCheck.Write(ctx, "01a0a84b-f1c3-7d10-8a62-1c4e8b37d9f5",
+	// 3. Mark the device with the same request id.
+	if _, err := client.DeviceCheck.Write(ctx, requestID,
 		fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)}); err != nil {
 		// Keep the device unmarked and write again on a later identification.
 		log.Print(err)
@@ -190,6 +193,50 @@ func ExampleNewProxy() {
 	mux := http.NewServeMux()
 	mux.Handle("/k7x2qm4a", proxy)
 	log.Fatal(http.ListenAndServe(":8080", mux))
+}
+
+// AgentSightings reports what the site served after each response, and
+// answers from memory what sent a request.
+func ExampleNewAgentSightings() {
+	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+	sightings, err := fingerly.NewAgentSightings(client, fingerly.AgentSightingsOptions{
+		// The same trusted source as the proxy's ClientIP.
+		ClientIP: func(r *http.Request) string {
+			if address := r.Header.Get("X-Real-IP"); address != "" {
+				return address
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			return host
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answer := sightings.Lookup(r)
+		if answer.AI != nil && answer.AI.Verification.Result == fingerly.AIVerificationFail {
+			// It names an AI agent, and checking that claim failed.
+		}
+		// AgentUnknown, or anything else: serve as usual.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<!doctype html><title>Shop</title>")
+	})
+	server := &http.Server{Addr: ":8080", Handler: sightings.Middleware(site)}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	// On SIGTERM, stop serving, then send what is still waiting.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdown)
+	_ = sightings.Shutdown(shutdown)
 }
 
 func enqueue(id string, body []byte) {}

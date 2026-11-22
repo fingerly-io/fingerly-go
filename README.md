@@ -32,7 +32,7 @@ Go 1.22 or newer. No dependencies outside the standard library.
 **2. Install.**
 
 ```sh
-go get github.com/fingerly-io/fingerly-go@v0.4.1
+go get github.com/fingerly-io/fingerly-go@v0.5.0
 ```
 
 **3. Read an event.**
@@ -69,6 +69,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/go](https://docs.fingerly.io/doc
 | Read or write an iOS device's DeviceCheck bits | [DeviceCheck bits on iOS](#devicecheck-bits-on-ios) |
 | Check a webhook signature | [Verify webhooks](#verify-webhooks) |
 | Keep identification working behind content blockers | [First-party proxy](#first-party-proxy) |
+| See AI crawlers that never run JavaScript | [AI crawlers your server served](#ai-crawlers-your-server-served) |
 
 ## Contents
 
@@ -81,6 +82,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/go](https://docs.fingerly.io/doc
 - [DeviceCheck bits on iOS](#devicecheck-bits-on-ios)
 - [Verify webhooks](#verify-webhooks)
 - [First-party proxy](#first-party-proxy)
+- [AI crawlers your server served](#ai-crawlers-your-server-served)
 - [Development and release preparation](#development-and-release-preparation)
 - [Requirements](#requirements)
 - [Documentation](#documentation)
@@ -101,7 +103,7 @@ Every call takes a `context.Context`, and a Go request context governs the whole
 
 ## Errors
 
-Any response outside 2xx, redirects included, returns an `*APIError` with `Status`, and optional `Code`, `Details`, `RequestID` and `RetryAfter`. The secret key is stripped from all of them, and the response body is never echoed. `RetryAfter` is the number of seconds from the `Retry-After` header, or nil when there was none; the SDK never retries a read itself.
+Any response outside 2xx, redirects included, returns an `*APIError` with `Status`, and optional `Code`, `Details`, `RequestID`, `RetryAfter` and `RateLimitScope` (from `Fingerly-RateLimit-Scope` on a `429`, such as `fingerly.RateLimitScopeDaily`). The secret key is stripped from all of them, and the response body is never echoed. `RetryAfter` is the number of seconds from the `Retry-After` header, or nil when there was none; the SDK never retries a read itself.
 
 ```go
 var apiErr *fingerly.APIError
@@ -129,7 +131,7 @@ case errors.Is(err, fingerly.ErrEventNotFound):
 
 A read that got no complete answer (refused, reset, timed out, or broken off mid-body) returns a `*fingerly.ConnectionError`, and `errors.Is(err, fingerly.ErrTimeout)` is true when a deadline passed. Its message names neither the key nor the endpoint. An answer over 4 MiB returns `fingerly.ErrResponseTooLarge`.
 
-Printing a `Client`, `Proxy` or `ProxyOptions` with any `fmt` verb, `slog` or `encoding/json` shows the keys as `[redacted]`.
+Printing a `Client`, `Proxy`, `ProxyOptions` or `AgentSightings` with any `fmt` verb, `slog` or `encoding/json` shows the keys as `[redacted]`.
 
 ## Unscored events
 
@@ -166,6 +168,11 @@ Every closed set the API reports is a named string type with a constant per valu
 | `AttestSkippedReason` | `Attestation.AttestSkipped` | `AttestSkippedNotOffered`, `AttestSkippedUnsupported`, `AttestSkippedChallengeUnavailable`, `AttestSkippedKeyError`, `AttestSkippedTimeout`, `AttestSkippedBackoff`, `AttestSkippedInstallUnavailable` |
 | `EventState` | `Event.State` | `EventStatePending`, `EventStateEnriched`, `EventStateUnavailable` |
 | `AnonymityNetwork` | `Event.AnonymityNetwork` | `AnonymityNetworkTor`, `AnonymityNetworkRelay`, `AnonymityNetworkVPN`, `AnonymityNetworkProxy`, `AnonymityNetworkHosting` |
+| `VisitorKind` | `Event.VisitorKind`, `EventListParams.Kind` | `VisitorKindHuman`, `VisitorKindAIBot`, `VisitorKindAutomation`, `VisitorKindSearchCrawler` |
+| `AIPurpose` | `AIAgent.Purpose`, `EventListParams.AIPurpose` | `AIPurposeTraining`, `AIPurposeSearch`, `AIPurposeUserFetch`, `AIPurposeAgent` |
+| `AIRuntime` | `AIAgent.Runtime` | `AIRuntimeProviderCloud`, `AIRuntimeHostedBrowser`, `AIRuntimeUserDevice` |
+| `AIVerificationMethod` | `AIVerification.Method` | `AIVerificationSignature`, `AIVerificationIPList`, `AIVerificationReverseDNS`, `AIVerificationNone` |
+| `AIVerificationResult` | `AIVerification.Result` | `AIVerificationPass`, `AIVerificationFail`, `AIVerificationNotAttempted` |
 | `Environment` | `Event.Environment` | `EnvironmentProduction`, `EnvironmentStaging`, `EnvironmentDevelopment` |
 | `RiskPlatform` | `Event.Platform`, `EventRiskReport.Platform` | `RiskPlatformWeb`, `RiskPlatformIOS`, `RiskPlatformAndroid` |
 | `RiskSource` | `EventRiskReport.Source` | `RiskSourceKey`, `RiskSourceOrganization`, `RiskSourceDefault` |
@@ -176,6 +183,23 @@ Every closed set the API reports is a named string type with a constant per valu
 A value the server adds after this release still decodes, as a value no constant names. A `string` variable needs a conversion to compare, such as `fingerly.Signal(name)`.
 
 A native `Attestation` also carries `AttestSkipped` (the app's reason for sending no proof) and `Downgrade` (the report named an install an attested device owns).
+
+`Event.VisitorKind` says what sort of client made the request. When it is `VisitorKindAIBot`, `Event.AI` (`*AIAgent`) names the agent: `Name` and `Provider` (open strings, such as `ChatGPT-User` and `OpenAI`), `Purpose`, `Runtime`, `Declared`, and `Verification` with `Method` and `Result`. On every other event `AI` is nil. The agent is named by a Web Bot Auth signature when the request carried one, otherwise by its user agent. `Verification` says how far that was checked: `AIVerificationSignature` (the operator's published key signed the request) or `AIVerificationIPList` (the address is inside the operator's published ranges), with result `AIVerificationPass`, `AIVerificationFail` (the name was borrowed), or `AIVerificationNotAttempted` with method `AIVerificationNone` (the operator publishes nothing to check against, or it could not be checked; the name is then only the client's claim). Only clients that run the browser SDK produce events, so a crawler that does not run JavaScript never appears; [AI crawlers your server served](#ai-crawlers-your-server-served) covers those. `EventListParams` narrows a listing by `Kind`, `AIProvider` (exact and case sensitive, as events name it) and `AIPurpose`, next to `Visitor` and `Level`:
+
+```go
+page, err := client.Events.List(ctx, &fingerly.EventListParams{
+	Kind:      fingerly.VisitorKindAIBot,
+	AIPurpose: fingerly.AIPurposeUserFetch,
+})
+if err != nil {
+	return err
+}
+for _, event := range page.Rows {
+	if event.AI != nil {
+		log.Printf("%s %s", event.AI.Provider, event.AI.Name)
+	}
+}
+```
 
 ## Verify a backend action
 
@@ -281,7 +305,7 @@ if errors.As(err, &consumed) {
 
 ## DeviceCheck bits on iOS
 
-When DeviceCheck is turned on for the project's Apple key, Fingerly holds the Apple DeviceCheck token of an iOS identification for one hour. `client.DeviceCheck` spends it, once, to read or to write the two bits Apple keeps for the device. The bits survive a reinstall and mean what you decide.
+When DeviceCheck is turned on for the project's Apple key, Fingerly holds two Apple DeviceCheck tokens of an iOS identification for one hour, a read token and a write token. `client.DeviceCheck` spends each once: `Query` the read token to read the two bits Apple keeps for the device, `Write` the write token to set them. The bits survive a reinstall and mean what you decide.
 
 ```go
 bits, err := client.DeviceCheck.Query(ctx, requestID)
@@ -290,17 +314,17 @@ bits, err := client.DeviceCheck.Query(ctx, requestID)
 _, err = client.DeviceCheck.Write(ctx, requestID, fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)})
 ```
 
-Apple treats a DeviceCheck token as single-use, so a read and a write each need their own identification. A once-per-device free trial takes two:
+Apple treats a DeviceCheck token as single-use, so one identification supports one read and one write. A once-per-device free trial does both on the identification that asks for the trial:
 
-1. On the identification that asks for the trial, call `Query`. If the bits say the device already had one, refuse it.
+1. Call `Query`. If the bits say the device already had one, refuse it.
 2. Otherwise grant the trial and record the grant in your own data, with the device not yet marked.
-3. On the next identification from that install (the app can identify again right after the grant), call `Write` with the bit, then mark the record. Until the write lands, your own record is what stops a second trial.
+3. Call `Write` with the bit and the same request ID, then mark the record. Until the write lands, your own record is what stops a second trial.
 
 Each answer has a sentinel for `errors.Is`; the concrete error is an `*APIError`:
 
 | Sentinel | Status and code | What to do |
 | --- | --- | --- |
-| `ErrDeviceCheckNotHeld` | `404 device_check_not_held` | No token for that event. Decide without the bits. |
+| `ErrDeviceCheckNotHeld` | `404 device_check_not_held` | No token for that call. Decide without the bits. |
 | `ErrDeviceCheckSpent` | `409 device_check_spent` | Already used, or not the request it was first used for. Use another identification. |
 | `ErrDeviceCheckBusy` | `409 device_check_busy` | Another call is using it. Retry in a moment. |
 | `ErrCredentialUnavailable` | `409 credential_unavailable` | Fix the Apple key, then retry within the hour. |
@@ -308,7 +332,7 @@ Each answer has a sentinel for `errors.Is`; the concrete error is an `*APIError`
 | `ErrAppleRejected` | `422 apple_rejected` | Apple rejected the token; `APIError.AppleStatus` holds Apple's HTTP status. |
 | `ErrDeviceCheckUnavailable` | `503 device_check_unavailable` | The token is kept. Retry the same call within the hour. |
 
-A retry must be the same request: while a token is kept after an answer that was not definite, the API accepts only the operation and bits it was first used for, and answers anything else with `device_check_spent`. The SDK retries a `503` or a call that got no complete answer up to twice, with the identical request, and nothing else. When you retry later yourself, repeat the same call with the same bits.
+A retry must be the same request: while a token is kept after an answer that was not definite, the API accepts only the call and bits it was first used for, and answers a second read, or a write with other bits, with `device_check_spent`. The SDK retries a `503` or a call that got no complete answer up to twice, with the identical request, and nothing else. When you retry later yourself, repeat the same call with the same bits.
 
 ## Verify webhooks
 
@@ -398,7 +422,7 @@ Every forwarded request goes with its raw body bytes untouched (never JSON re-en
 | Any other upstream failure: refused, reset, DNS, a truncated or malformed answer, an answer over 4 MiB | `502` |
 | `ClientIP` returns no valid address | `500` with "The client IP callback returned no valid address" |
 
-The caller must present a public key from the same environment as the proxy key, or the request gets `401`. Incoming headers follow the sanitize-and-restore sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). A request carries one channel upstream: with an `Origin` it goes as a browser request (`X-Fingerly-Origin`) and the platform header is not forwarded; without one, the validated platform is. When both `Origin` and a validated `X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400` (`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`, `Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified proxy metadata (`X-Fingerly-Host` included), only `Content-Type`, `X-Api-Key`, `User-Agent`, `Idempotency-Key`, `Sec-Fetch-*` and `Sec-CH-UA-*` are forwarded. The proxy reports itself upstream as `go/0.4.1`, which the dashboard shows per proxy.
+The caller must present a public key from the same environment as the proxy key, or the request gets `401`. Incoming headers follow the sanitize-and-restore sequence: all incoming `X-Fingerly-*`, `Cookie` and `Authorization` headers are stripped, restoring `X-Fingerly-SDK-Platform` only if it matched an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). A request carries one channel upstream: with an `Origin` it goes as a browser request (`X-Fingerly-Origin`) and the platform header is not forwarded; without one, the validated platform is. When both `Origin` and a validated `X-Fingerly-SDK-Platform` are absent, the proxy rejects locally with `400` (`missing_origin`), and it never synthesizes `X-Fingerly-Origin` from `Host`, `Referer` or the request URL. Bodies over 1 MiB get `413`. Alongside verified proxy metadata (`X-Fingerly-Host` included), only `Content-Type`, `X-Api-Key`, `User-Agent`, `Idempotency-Key`, `Sec-Fetch-*`, `Sec-CH-UA-*` and the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` (each dropped when over 4096 bytes) are forwarded. The proxy reports itself upstream as `go/0.5.0`, which the dashboard shows per proxy.
 
 One deadline, `Timeout` (5 seconds by default), covers the whole upstream exchange, body included, so a trickling answer cannot stretch it. When it passes the browser gets `504`; any other upstream failure (refused, reset, DNS, a truncated or malformed answer, an answer over 4 MiB) gets `502`. Both carry a short `text/plain` body and `Cache-Control: no-store`. The answer is read in full before anything is written, so a broken upstream never reaches the browser as a `200`. A visitor who disconnects cancels the upstream call, except under fiber, whose adaptor has no disconnect signal, so the call runs to `Timeout`.
 
@@ -415,6 +439,78 @@ OnError: func(r *http.Request, failure *fingerly.ProxyError) {
 Responses are marked `no-store`, and the only upstream headers relayed back are `Content-Type`, `X-Request-Id`, `RateLimit-Limit`, `RateLimit-Remaining` and `Retry-After`, so nothing on the response names Fingerly. Use the path the dashboard issued: blockers look for words such as `fingerprint`, `tracking`, `analytics` and `fingerly` in the URL.
 
 > **`ClientIP` is the one thing you must get right.** Resolve it from a header your own infrastructure sets, such as your load balancer's or CDN's, and fall back to `r.RemoteAddr`. Never read the left-most `X-Forwarded-For` value: the visitor writes it. It must return exactly one IPv4 or IPv6 address. Anything else (empty, a list, a port) is a configuration error: the proxy answers `500` with "The client IP callback returned no valid address", calls nothing upstream, and reports it once.
+
+## AI crawlers your server served
+
+Most AI crawlers and fetchers (GPTBot, ClaudeBot and the like) read a page's HTML and never run its JavaScript, so the browser SDK never sees them. `AgentSightings` reports the requests your server served to Fingerly, which says what sent each one, and remembers the answers so your code can ask in memory. Its counts appear in the dashboard next to the agents the browser SDK identified.
+
+Build one per process from a client made with a secret key, wrap your site in its middleware, and shut it down after your server stops:
+
+```go
+client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
+
+sightings, err := fingerly.NewAgentSightings(client, fingerly.AgentSightingsOptions{
+	// The same trusted source as ProxyOptions.ClientIP: never the left-most X-Forwarded-For.
+	ClientIP: func(r *http.Request) string {
+		if address := r.Header.Get("X-Real-IP"); address != "" {
+			return address
+		}
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		return host
+	},
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+server := &http.Server{Addr: ":8080", Handler: sightings.Middleware(site)}
+go func() {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}()
+
+// On SIGTERM, stop serving, then send what is still waiting, within one deadline.
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+<-ctx.Done()
+shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+server.Shutdown(shutdown)
+sightings.Shutdown(shutdown)
+```
+
+`sightings.Shutdown(ctx)` stops the background goroutine and sends what is waiting, and gives up when `ctx` is done, so one deadline bounds the whole shutdown. `sightings.Close()` does the same without a deadline of its own: each batch has 5 seconds, and it stops at the first batch Fingerly does not take. Both are safe to call more than once and from several goroutines, `OnError` included; requests served afterwards are not reported. Never rely on `defer sightings.Close()` in `main` next to `log.Fatal(http.ListenAndServe(...))`: `log.Fatal` exits without running deferred calls, so what was waiting is lost.
+
+`Middleware` takes any `http.Handler`, so it works with every router built on net/http (`r.Use(sightings.Middleware)` in chi, `router.Use(sightings.Middleware)` in gorilla/mux). The writer it hands your handler keeps `http.Flusher`, `http.Hijacker`, `io.ReaderFrom`, `http.Pusher`, `http.CloseNotifier` and `http.ResponseController` working, and a page written without a `Content-Type` is reported by the type net/http sniffs for it. From a stack that does not use net/http handlers, call `sightings.Report(r, contentType)` once the response is written.
+
+Ask what sent a request with `Lookup`. It answers from memory only and never fails: a request it has no answer for is `fingerly.AgentUnknown`, which means "serve as usual". Compare against the named constants:
+
+```go
+answer := sightings.Lookup(r)
+switch {
+case answer == fingerly.AgentUnknown:
+	// Not answered yet: serve as usual.
+case answer.AI != nil && answer.AI.Verification.Result == fingerly.AIVerificationFail:
+	// It names an AI agent, and checking that claim failed.
+case answer.AI != nil && answer.AI.Purpose == fingerly.AIPurposeTraining:
+	// A training crawler.
+case answer.VisitorKind == fingerly.VisitorKindSearchCrawler:
+	// A search engine crawler, such as Googlebot.
+}
+```
+
+The first request from a client is answered `AgentUnknown`; once Fingerly has answered (within about two seconds), the same user agent from the same address is answered from memory for as long as the API allows. A request signed with Web Bot Auth is checked every time, so `Lookup` answers it `AgentUnknown`. A request Fingerly could not use is answered `fingerly.VisitorKindUnknown` with a TTL of 0, so it is never remembered and `Lookup` answers it `AgentUnknown` too; the other requests of the batch are answered as usual.
+
+**What is reported.** By default, every response with a `Content-Type` of `text/html` or `application/xhtml+xml`, plus every request for `/robots.txt`, `/llms.txt` and `/llms-full.txt`, whatever the status. Static assets, API routes and health checks are left out. Change that with `ContentTypes` (replaces the default list), `IncludePaths` (path prefixes reported whatever their content type) and `ExcludePaths` (path prefixes never reported, which win over every other rule). Reporting never depends on the user agent, the address or any request header.
+
+**What is sent.** For each reported request: the `User-Agent` header (a request whose user agent is over 4096 bytes is not reported), the address from `ClientIP` (a request whose address does not resolve is not reported), the `Host`, the method, the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` headers when present (each left out when over 4096 bytes), and how many times that request was seen since it was last reported. Never the path, the query string, cookies, `Authorization`, any other header, the body or the response. None of these fields is ever logged.
+
+**Memory.** Answers live in a least-recently-used cache of `CacheSize` entries (4096 by default, about 1.5 MB; at most `fingerly.MaxAgentCacheSize`, 65536, about 25 MB). Waiting reports are capped at 1000; past that, a new request is not reported and `sightings.Dropped()` counts it, while requests already waiting keep counting. Repeats of the same request fold into one report with a count.
+
+**Never in the way.** Reports go from one background goroutine, in batches of up to 200, after each response is written, so serving never waits on the network. A batch goes when 200 requests or 64 KiB are waiting, or two seconds after the oldest, with a 5 second deadline. When Fingerly asks the SDK to slow down (`429`), it waits as long as `Retry-After` says (at most a day) and keeps counting; when Fingerly is unavailable, it retries with a backoff from 1 to 60 seconds; a refused key pauses reporting for a minute; a `422` (no request in the batch was usable) drops the batch. Failures are reported at most once a minute to `OnError`, or as one line through `slog.Default()`, and never carry a key, an address, a user agent or any header. `OnError` may be called from several goroutines at once. A panic in `ClientIP` or `OnError` is recovered and reported: the request is served as usual and not reported, and the background goroutine keeps running. Whatever happens, requests keep being served and `Lookup` keeps answering.
+
+In a serverless function, call `sightings.Flush(ctx)` before the invocation ends. `client.Agents.Sightings(ctx, items)` is the call underneath, for a reporter of your own; a `429` from it is an `*APIError` whose `RetryAfter` and `RateLimitScope` (`fingerly.RateLimitScopeDaily` for the daily allowance) say when to report again.
 
 ## Development and release preparation
 

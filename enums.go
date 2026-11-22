@@ -39,6 +39,7 @@ const (
 	SignalFridaDetected         Signal = "frida_detected"
 	SignalBrowserTampering      Signal = "browser_tampering"
 	SignalFingerprintSuppressed Signal = "fingerprint_suppressed"
+	SignalIdentityObfuscated    Signal = "identity_obfuscated"
 	SignalDeveloperTools        Signal = "developer_tools"
 	SignalRemoteControl         Signal = "remote_control"
 	SignalBot                   Signal = "bot"
@@ -65,7 +66,6 @@ const (
 	SignalResidentialProxyMediumConfidence Signal = "residential_proxy_medium_confidence"
 	SignalResidentialProxyHighConfidence   Signal = "residential_proxy_high_confidence"
 	SignalVPNPublic                        Signal = "vpn_public"
-	SignalVPNTimezone                      Signal = "vpn_timezone"
 	SignalVPNRelay                         Signal = "vpn_relay"
 	SignalVPNMobile                        Signal = "vpn_mobile"
 	SignalVPNOSMismatch                    Signal = "vpn_os_mismatch"
@@ -93,6 +93,7 @@ const (
 	SignalAntidetectBrowser                Signal = "antidetect_browser"
 	SignalAutomation                       Signal = "automation"
 	SignalBadBot                           Signal = "bad_bot"
+	SignalAISpoofed                        Signal = "ai_spoofed"
 	SignalFetchMetadataMissing             Signal = "fetch_metadata_missing"
 	SignalWebTicketMissing                 Signal = "web_ticket_missing"
 	SignalWebTicketInvalid                 Signal = "web_ticket_invalid"
@@ -199,6 +200,72 @@ const (
 	AnonymityNetworkVPN     AnonymityNetwork = "vpn"
 	AnonymityNetworkProxy   AnonymityNetwork = "proxy"
 	AnonymityNetworkHosting AnonymityNetwork = "hosting"
+)
+
+// VisitorKind is what sort of client made a request.
+type VisitorKind string
+
+const (
+	VisitorKindHuman         VisitorKind = "human"
+	VisitorKindAIBot         VisitorKind = "ai_bot"
+	VisitorKindAutomation    VisitorKind = "automation"
+	VisitorKindSearchCrawler VisitorKind = "search_crawler"
+	// VisitorKindUnknown is only in an agent sightings answer: a request the
+	// server could not use; TTL 0, never remembered. An event never carries
+	// it.
+	VisitorKindUnknown VisitorKind = "unknown"
+)
+
+// AIPurpose is what an AI agent's operator says its traffic is for.
+type AIPurpose string
+
+const (
+	// AIPurposeTraining is collecting content to train models.
+	AIPurposeTraining AIPurpose = "training"
+	// AIPurposeSearch is indexing for an AI answer or search product.
+	AIPurposeSearch AIPurpose = "search"
+	// AIPurposeUserFetch is reading a page a person asked an assistant to read.
+	AIPurposeUserFetch AIPurpose = "user_fetch"
+	// AIPurposeAgent is driving a browser on a person's behalf.
+	AIPurposeAgent AIPurpose = "agent"
+)
+
+// AIRuntime is where an AI agent runs.
+type AIRuntime string
+
+const (
+	// AIRuntimeProviderCloud is the operator's own infrastructure.
+	AIRuntimeProviderCloud AIRuntime = "provider_cloud"
+	// AIRuntimeHostedBrowser is a third party's cloud browser.
+	AIRuntimeHostedBrowser AIRuntime = "hosted_browser"
+	// AIRuntimeUserDevice is a person's own browser.
+	AIRuntimeUserDevice AIRuntime = "user_device"
+)
+
+// AIVerificationMethod is how an AI agent's claimed identity was checked.
+type AIVerificationMethod string
+
+const (
+	// AIVerificationSignature is a signed request.
+	AIVerificationSignature AIVerificationMethod = "signature"
+	// AIVerificationIPList is the operator's published address ranges.
+	AIVerificationIPList AIVerificationMethod = "ip_list"
+	// AIVerificationReverseDNS is a reverse lookup confirmed forward.
+	AIVerificationReverseDNS AIVerificationMethod = "reverse_dns"
+	// AIVerificationNone is no check at all.
+	AIVerificationNone AIVerificationMethod = "none"
+)
+
+// AIVerificationResult is what checking an AI agent's claimed identity found.
+type AIVerificationResult string
+
+const (
+	// AIVerificationPass means the claim held.
+	AIVerificationPass AIVerificationResult = "pass"
+	// AIVerificationFail means it was checked and did not hold.
+	AIVerificationFail AIVerificationResult = "fail"
+	// AIVerificationNotAttempted means no check ran.
+	AIVerificationNotAttempted AIVerificationResult = "not_attempted"
 )
 
 // Environment is the deployment an event was recorded in, set by the key

@@ -123,6 +123,81 @@ func TestReadsEveryEventFixture(t *testing.T) {
 	}
 }
 
+func responseFixture(t *testing.T, name string) json.RawMessage {
+	t.Helper()
+	for _, fixture := range loadFixtures(t).Responses {
+		if fixture.Name == name {
+			return fixture.Body
+		}
+	}
+	t.Fatalf("no %s fixture", name)
+	return nil
+}
+
+func TestReadsTheAIAgentFixture(t *testing.T) {
+	rec := newRecorder(t, respondRaw(http.StatusOK, responseFixture(t, "ai_agent")))
+	event, err := testClient(rec).Events.Get(context.Background(), "id")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.VisitorKind != VisitorKindAIBot {
+		t.Errorf("visitor kind is %q", event.VisitorKind)
+	}
+	want := AIAgent{
+		Name:     "ChatGPT-User",
+		Provider: "OpenAI",
+		Purpose:  AIPurposeUserFetch,
+		Runtime:  AIRuntimeProviderCloud,
+		Declared: true,
+		Verification: AIVerification{
+			Method: AIVerificationNone,
+			Result: AIVerificationNotAttempted,
+		},
+	}
+	if event.AI == nil || *event.AI != want {
+		t.Errorf("ai is %+v, want %+v", event.AI, want)
+	}
+}
+
+func TestAnEventThatIsNotAnAIAgentHasNoAI(t *testing.T) {
+	rec := newRecorder(t, respondRaw(http.StatusOK, responseFixture(t, "event")))
+	event, err := testClient(rec).Events.Get(context.Background(), "id")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.AI != nil {
+		t.Errorf("ai is %+v, want nil", event.AI)
+	}
+}
+
+func TestAIAgentKeepsValuesANewerServerAdds(t *testing.T) {
+	var body map[string]any
+	if err := json.Unmarshal(responseFixture(t, "ai_agent"), &body); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	body["visitor_kind"] = "kind_from_the_future"
+	body["ai"] = map[string]any{
+		"name": "Future-Agent", "provider": "Future", "declared": false,
+		"purpose": "purpose_from_the_future", "runtime": "runtime_from_the_future",
+		"verification": map[string]any{"method": "method_from_the_future", "result": "result_from_the_future"},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	rec := newRecorder(t, respondRaw(http.StatusOK, raw))
+	event, err := testClient(rec).Events.Get(context.Background(), "id")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if event.VisitorKind != "kind_from_the_future" || event.AI == nil ||
+		event.AI.Purpose != "purpose_from_the_future" || event.AI.Runtime != "runtime_from_the_future" ||
+		event.AI.Verification.Method != "method_from_the_future" ||
+		event.AI.Verification.Result != "result_from_the_future" {
+		t.Errorf("unknown values were not kept: %+v %+v", event.VisitorKind, event.AI)
+	}
+}
+
 func TestReadsEveryPageFixture(t *testing.T) {
 	for _, fixture := range loadFixtures(t).Responses {
 		if fixture.Schema != "SDKEventsOut" {

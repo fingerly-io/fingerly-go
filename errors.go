@@ -54,6 +54,10 @@ type APIError struct {
 	// its Retry-After header, or nil when it sent none. The SDK never retries
 	// a read itself.
 	RetryAfter *int
+	// RateLimitScope names the limit a 429 answer hit, from its
+	// Fingerly-RateLimit-Scope header, such as RateLimitScopeDaily, or "" when
+	// it sent none.
+	RateLimitScope string
 	// AppleStatus is Apple's HTTP status on an apple_rejected answer from a
 	// DeviceCheck call, read from the details entry named apple_status, and 0
 	// on any other error.
@@ -97,6 +101,10 @@ var sentinelAnswers = map[error]struct {
 	ErrEventAlreadyConsumed:   {http.StatusConflict, codeEventAlreadyConsumed},
 }
 
+// RateLimitScopeDaily is the APIError.RateLimitScope of a 429 answer refused
+// by the organization's daily allowance, which renews at the next UTC day.
+const RateLimitScopeDaily = "daily"
+
 const (
 	codeAppleRejected        = "apple_rejected"
 	codeEventAlreadyConsumed = "event_already_consumed"
@@ -137,10 +145,11 @@ var ErrInvalidVerifyOptions = errors.New("fingerly: invalid verify options")
 // write naming neither bit returns before anything is sent.
 var (
 	// ErrDeviceCheckNotHeld (404 device_check_not_held): no token is held for
-	// that event. Not a verdict: decide without the bits.
+	// that call. Not a verdict: decide without the bits.
 	ErrDeviceCheckNotHeld = errors.New("fingerly: no device check token is held for that event")
-	// ErrDeviceCheckSpent (409 device_check_spent): the token was already
-	// used, or this call is not the request the token was first used for.
+	// ErrDeviceCheckSpent (409 device_check_spent): the call's token was
+	// already used, a read's by a read or a write's by a write, or this call
+	// is not the request the token was first used for.
 	ErrDeviceCheckSpent = errors.New("fingerly: the event's device check token was already used")
 	// ErrDeviceCheckBusy (409 device_check_busy): another call is using the
 	// token right now.
@@ -198,14 +207,15 @@ func (e *ConnectionError) Unwrap() error { return e.cause }
 func (e *ConnectionError) Is(target error) bool { return target == ErrTimeout && e.Timeout }
 
 // parseRetryAfter reads a Retry-After header as whole seconds: either a
-// number of seconds or an HTTP date, which counts from now. Anything else is
-// nil.
+// number of seconds or an HTTP date, which counts from now. A number too
+// large for an int is the largest int. Anything else is nil.
 func parseRetryAfter(value string, now time.Time) *int {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
+	// Atoi holds an out-of-range number at the bound it passed.
+	if seconds, err := strconv.Atoi(value); err == nil || errors.Is(err, strconv.ErrRange) {
 		if seconds < 0 {
 			return nil
 		}

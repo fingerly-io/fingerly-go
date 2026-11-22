@@ -130,6 +130,7 @@ func TestListEncodesEveryFilter(t *testing.T) {
 	page, err := testClient(rec).Events.List(context.Background(), &EventListParams{
 		From: from, To: from.Add(24 * time.Hour),
 		Page: 2, Limit: 20, Visitor: "visitor-test", Level: "high",
+		Kind: VisitorKindAIBot, AIProvider: "OpenAI", AIPurpose: AIPurposeUserFetch,
 	})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -142,6 +143,7 @@ func TestListEncodesEveryFilter(t *testing.T) {
 	for name, want := range map[string]string{
 		"from": "2026-09-01T08:30:00Z", "to": "2026-09-02T08:30:00Z",
 		"page": "2", "limit": "20", "visitor": "visitor-test", "level": "high",
+		"kind": "ai_bot", "ai_provider": "OpenAI", "ai_purpose": "user_fetch",
 	} {
 		if got := query.Get(name); got != want {
 			t.Errorf("%s is %q, want %q", name, got, want)
@@ -178,6 +180,26 @@ func TestListSendsWindowBoundsInUTC(t *testing.T) {
 	}
 	if got := rec.requests[0].URL.Query().Get("from"); got != "2026-09-01T08:30:00Z" {
 		t.Errorf("from is %q, want the same instant in UTC", got)
+	}
+}
+
+func TestListKeepsTheWindowBoundsExact(t *testing.T) {
+	rec := newRecorder(t, respondJSON(http.StatusOK, map[string]any{
+		"rows": []any{}, "page": 1, "page_size": 10,
+	}))
+	// to is exclusive: cut to the second, the events of its last second
+	// would be left out.
+	to := time.Date(2026, 9, 1, 8, 30, 0, 750_000_000, time.UTC)
+	params := &EventListParams{From: to.Add(-time.Hour), To: to}
+	if _, err := testClient(rec).Events.List(context.Background(), params); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	query := rec.requests[0].URL.Query()
+	if got := query.Get("to"); got != "2026-09-01T08:30:00.75Z" {
+		t.Errorf("to is %q", got)
+	}
+	if got := query.Get("from"); got != "2026-09-01T07:30:00.75Z" {
+		t.Errorf("from is %q", got)
 	}
 }
 

@@ -76,10 +76,10 @@ func (p *EventListParams) query() string {
 	}
 	values := url.Values{}
 	if !p.From.IsZero() {
-		values.Set("from", p.From.UTC().Format(time.RFC3339))
+		values.Set("from", p.From.UTC().Format(time.RFC3339Nano))
 	}
 	if !p.To.IsZero() {
-		values.Set("to", p.To.UTC().Format(time.RFC3339))
+		values.Set("to", p.To.UTC().Format(time.RFC3339Nano))
 	}
 	if p.Page > 0 {
 		values.Set("page", strconv.Itoa(p.Page))
@@ -92,6 +92,15 @@ func (p *EventListParams) query() string {
 	}
 	if p.Level != "" {
 		values.Set("level", string(p.Level))
+	}
+	if p.Kind != "" {
+		values.Set("kind", string(p.Kind))
+	}
+	if p.AIProvider != "" {
+		values.Set("ai_provider", p.AIProvider)
+	}
+	if p.AIPurpose != "" {
+		values.Set("ai_purpose", string(p.AIPurpose))
 	}
 	if len(values) == 0 {
 		return ""

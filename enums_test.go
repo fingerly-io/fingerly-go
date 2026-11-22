@@ -29,6 +29,7 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalFridaDetected):         "frida_detected",
 		string(SignalBrowserTampering):      "browser_tampering",
 		string(SignalFingerprintSuppressed): "fingerprint_suppressed",
+		string(SignalIdentityObfuscated):    "identity_obfuscated",
 		string(SignalDeveloperTools):        "developer_tools",
 		string(SignalRemoteControl):         "remote_control",
 		string(SignalBot):                   "bot",
@@ -50,7 +51,6 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalResidentialProxyMediumConfidence): "residential_proxy_medium_confidence",
 		string(SignalResidentialProxyHighConfidence):   "residential_proxy_high_confidence",
 		string(SignalVPNPublic):                        "vpn_public",
-		string(SignalVPNTimezone):                      "vpn_timezone",
 		string(SignalVPNRelay):                         "vpn_relay",
 		string(SignalVPNMobile):                        "vpn_mobile",
 		string(SignalVPNOSMismatch):                    "vpn_os_mismatch",
@@ -78,6 +78,7 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalAntidetectBrowser):                "antidetect_browser",
 		string(SignalAutomation):                       "automation",
 		string(SignalBadBot):                           "bad_bot",
+		string(SignalAISpoofed):                        "ai_spoofed",
 		string(SignalFetchMetadataMissing):             "fetch_metadata_missing",
 		string(SignalWebTicketMissing):                 "web_ticket_missing",
 		string(SignalWebTicketInvalid):                 "web_ticket_invalid",
@@ -85,8 +86,8 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalAttestationDowngrade):             "attestation_downgrade",
 		string(SignalProbeErrors):                      "probe_errors",
 	}
-	if len(cases) != 73 {
-		t.Errorf("%d distinct signal values, want 73: a constant duplicates another", len(cases))
+	if len(cases) != 74 {
+		t.Errorf("%d distinct signal values, want 74: a constant duplicates another", len(cases))
 	}
 	for got, want := range cases {
 		if got != want {
@@ -124,6 +125,25 @@ func TestEnumWireValues(t *testing.T) {
 		{string(AnonymityNetworkVPN), "vpn"},
 		{string(AnonymityNetworkProxy), "proxy"},
 		{string(AnonymityNetworkHosting), "hosting"},
+		{string(VisitorKindHuman), "human"},
+		{string(VisitorKindAIBot), "ai_bot"},
+		{string(VisitorKindAutomation), "automation"},
+		{string(VisitorKindSearchCrawler), "search_crawler"},
+		{string(VisitorKindUnknown), "unknown"},
+		{string(AIPurposeTraining), "training"},
+		{string(AIPurposeSearch), "search"},
+		{string(AIPurposeUserFetch), "user_fetch"},
+		{string(AIPurposeAgent), "agent"},
+		{string(AIRuntimeProviderCloud), "provider_cloud"},
+		{string(AIRuntimeHostedBrowser), "hosted_browser"},
+		{string(AIRuntimeUserDevice), "user_device"},
+		{string(AIVerificationSignature), "signature"},
+		{string(AIVerificationIPList), "ip_list"},
+		{string(AIVerificationReverseDNS), "reverse_dns"},
+		{string(AIVerificationNone), "none"},
+		{string(AIVerificationPass), "pass"},
+		{string(AIVerificationFail), "fail"},
+		{string(AIVerificationNotAttempted), "not_attempted"},
 		{string(EnvironmentProduction), "production"},
 		{string(EnvironmentStaging), "staging"},
 		{string(EnvironmentDevelopment), "development"},

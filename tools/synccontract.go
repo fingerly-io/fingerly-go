@@ -23,6 +23,11 @@ import (
 
 var files = []string{"openapi.json", "fixtures.json"}
 
+// authoredFiles are written in the contract directory itself rather than
+// exported by the server, so the manifest records no hash for them; they are
+// copied as they are.
+var authoredFiles = []string{"agent-sightings-vectors.json"}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -59,6 +64,16 @@ func run() error {
 		sum := sha256.Sum256(content)
 		if got := hex.EncodeToString(sum[:]); got != manifest.Files[name] {
 			return fmt.Errorf("invalid contract hash for %s: %s", name, got)
+		}
+		staged[name] = content
+	}
+	for _, name := range authoredFiles {
+		content, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if !json.Valid(content) {
+			return fmt.Errorf("invalid JSON in %s", name)
 		}
 		staged[name] = content
 	}
