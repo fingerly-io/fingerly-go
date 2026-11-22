@@ -750,10 +750,12 @@ func (s *AgentSightings) settle(
 // retryWait is how long a 429 asks the SDK to wait: Retry-After, or without
 // one, until the next UTC day for the daily allowance and a minute otherwise.
 // A Retry-After of 0 or in the past still waits a second; a negative or
-// unreadable one reaches here as none.
+// unreadable one reaches here as none. One over a day waits a day: the daily
+// allowance renews within one, and a larger value would overflow a Duration.
 func retryWait(now time.Time, apiErr *APIError) time.Duration {
 	if apiErr.RetryAfter != nil {
-		return max(time.Duration(*apiErr.RetryAfter)*time.Second, sightingsMinWait)
+		seconds := min(*apiErr.RetryAfter, sightingsMaxTTL)
+		return max(time.Duration(seconds)*time.Second, sightingsMinWait)
 	}
 	if apiErr.RateLimitScope == RateLimitScopeDaily {
 		utc := now.UTC()
