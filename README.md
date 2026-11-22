@@ -444,7 +444,7 @@ Responses are marked `no-store`, and the only upstream headers relayed back are 
 
 Most AI crawlers and fetchers (GPTBot, ClaudeBot and the like) read a page's HTML and never run its JavaScript, so the browser SDK never sees them. `AgentSightings` reports the requests your server served to Fingerly, which says what sent each one, and remembers the answers so your code can ask in memory. Its counts appear in the dashboard next to the agents the browser SDK identified.
 
-Build one per process from a client made with a secret key, wrap your site in its middleware, and close it on shutdown:
+Build one per process from a client made with a secret key, wrap your site in its middleware, and shut it down after your server stops:
 
 ```go
 client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
@@ -462,10 +462,25 @@ sightings, err := fingerly.NewAgentSightings(client, fingerly.AgentSightingsOpti
 if err != nil {
 	log.Fatal(err)
 }
-defer sightings.Close()
 
-log.Fatal(http.ListenAndServe(":8080", sightings.Middleware(site)))
+server := &http.Server{Addr: ":8080", Handler: sightings.Middleware(site)}
+go func() {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}()
+
+// On SIGTERM, stop serving, then send what is still waiting, within one deadline.
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+<-ctx.Done()
+shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+server.Shutdown(shutdown)
+sightings.Shutdown(shutdown)
 ```
+
+`sightings.Shutdown(ctx)` stops the background goroutine and sends what is waiting, and gives up when `ctx` is done, so one deadline bounds the whole shutdown. `sightings.Close()` does the same without a deadline of its own: each batch has 5 seconds, and it stops at the first batch Fingerly does not take. Both are safe to call more than once and from several goroutines; requests served afterwards are not reported. Never rely on `defer sightings.Close()` in `main` next to `log.Fatal(http.ListenAndServe(...))`: `log.Fatal` exits without running deferred calls, so what was waiting is lost.
 
 `Middleware` takes any `http.Handler`, so it works with every router built on net/http (`r.Use(sightings.Middleware)` in chi, `router.Use(sightings.Middleware)` in gorilla/mux). The writer it hands your handler keeps `http.Flusher`, `http.Hijacker` and `http.ResponseController` working. From a stack that does not use net/http handlers, call `sightings.Report(r, contentType)` once the response is written.
 

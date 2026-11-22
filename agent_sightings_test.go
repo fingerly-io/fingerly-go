@@ -1284,3 +1284,151 @@ func TestAPanickingOnErrorNeverEndsTheProcess(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestTheFlusherStartsNoBatchOnceShutdownBegan(t *testing.T) {
+	h := newHarness(t, nil)
+	for i := range 3 * maxSightingsItems {
+		h.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	h.clock.Advance(time.Hour)
+	close(h.stop)
+	// A tick and a wake ready alongside stop: select would pick one of them
+	// half the time, so try often enough that a lucky pick cannot pass.
+	ticks := make(chan time.Time, 1)
+	for range 32 {
+		h.done = make(chan struct{})
+		select {
+		case h.wake <- struct{}{}:
+		default:
+		}
+		select {
+		case ticks <- time.Now():
+		default:
+		}
+		h.loopWith(ticks)
+		if sent := len(h.api.sent()); sent != 0 {
+			t.Fatalf("the flusher sent %d batches after Shutdown began", sent)
+		}
+	}
+}
+
+func TestADueFlushStopsBetweenBatchesOnceShutdownBegan(t *testing.T) {
+	h := newHarness(t, nil)
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	h.api.setRespond(func(w http.ResponseWriter, batch []AgentSighting) {
+		entered <- struct{}{}
+		<-release
+		answerAll("r", 60)(w, batch)
+	})
+	for i := range 3 * maxSightingsItems {
+		h.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	h.clock.Advance(time.Hour)
+	done := make(chan struct{})
+	go func() {
+		h.flushDue()
+		close(done)
+	}()
+	<-entered
+	close(h.stop)
+	close(release)
+	<-done
+	if sent := len(h.api.sent()); sent != 1 {
+		t.Fatalf("sent %d batches after Shutdown began", sent)
+	}
+	if len(h.pendingItems()) != 2*maxSightingsItems {
+		t.Fatal("the reports left for Shutdown's own flush were lost")
+	}
+}
+
+func TestShutdownGivesUpWhenItsContextEnds(t *testing.T) {
+	api := newSightingsAPI(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	api.setRespond(func(http.ResponseWriter, []AgentSighting) { <-release })
+	client := New(testSecretKey, WithEndpoint(api.server.URL), WithAllowInsecureLoopback())
+	sightings, err := NewAgentSightings(client, AgentSightingsOptions{ClientIP: testIP, OnError: func(error) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 * maxSightingsItems {
+		sightings.Report(served("ua"+strconv.Itoa(i), "198.51.100.1", nil), "text/html")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(api.sent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(api.sent()) != 1 {
+		t.Fatal("the flusher did not start a batch")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := sightings.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Shutdown took %s with a 200ms context", elapsed)
+	}
+	select {
+	case <-sightings.done:
+	default:
+		t.Fatal("the flusher is still running")
+	}
+	if err := sightings.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a second Shutdown returned %v, not the first one's result", err)
+	}
+	if sightings.Close() != nil {
+		t.Fatal("Close returned an error")
+	}
+}
+
+func TestShutdownAndCloseAreSafeConcurrentlyAndAfterwards(t *testing.T) {
+	api := newSightingsAPI(t)
+	client := New(testSecretKey, WithEndpoint(api.server.URL), WithAllowInsecureLoopback())
+	sightings, err := NewAgentSightings(client, AgentSightingsOptions{ClientIP: testIP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sightings.Report(served("before", "198.51.100.1", nil), "text/html")
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				_ = sightings.Close()
+			} else {
+				_ = sightings.Shutdown(context.Background())
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			r := served("during"+strconv.Itoa(i), "198.51.100.1", nil)
+			sightings.Report(r, "text/html")
+			_ = sightings.Lookup(r)
+			sightings.Flush(context.Background())
+		}()
+	}
+	wg.Wait()
+	sent := len(api.sent())
+	r := served("after", "198.51.100.1", nil)
+	sightings.Report(r, "text/html")
+	_ = sightings.Lookup(r)
+	sightings.Flush(context.Background())
+	if sightings.Shutdown(context.Background()) != nil || sightings.Close() != nil {
+		t.Fatal("a late Shutdown or Close failed")
+	}
+	if len(api.sent()) != sent {
+		t.Fatal("reported after Close")
+	}
+	var total int
+	for _, batch := range api.sent() {
+		total += len(batch)
+	}
+	if total == 0 {
+		t.Fatal("Close sent nothing")
+	}
+}

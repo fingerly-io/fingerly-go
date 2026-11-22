@@ -94,8 +94,9 @@ type AgentSightingsOptions struct {
 // it. Lookup never waits on the network and never fails: a request it holds no
 // answer for is AgentUnknown, which means "serve as usual".
 //
-// Build one per process, mount its Middleware, and Close it on shutdown. In a
-// serverless function, call Flush before the invocation ends.
+// Build one per process, mount its Middleware, and call Shutdown (or Close)
+// once your server has stopped serving. In a serverless function, call Flush
+// before the invocation ends.
 type AgentSightings struct {
 	client       *Client
 	clientIP     func(*http.Request) string
@@ -136,11 +137,16 @@ type AgentSightings struct {
 	// runs per process and Flush can stop waiting for it.
 	flushing chan struct{}
 
-	wake      chan struct{}
-	stop      chan struct{}
-	done      chan struct{}
-	running   atomic.Bool
-	closeOnce sync.Once
+	wake chan struct{}
+	stop chan struct{}
+	done chan struct{}
+	// loopCtx governs the flusher's batches. Shutdown cancels it when its own
+	// context ends first, abandoning the batch in flight.
+	loopCtx    context.Context
+	cancelLoop context.CancelFunc
+	running    atomic.Bool
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 // sightingEntry is one remembered answer.
@@ -212,7 +218,10 @@ func newAgentSightings(client *Client, options AgentSightingsOptions) (*AgentSig
 	if err != nil {
 		return nil, err
 	}
+	loopCtx, cancelLoop := context.WithCancel(context.Background())
 	return &AgentSightings{
+		loopCtx:      loopCtx,
+		cancelLoop:   cancelLoop,
 		client:       client,
 		clientIP:     options.ClientIP,
 		onError:      options.OnError,
@@ -494,19 +503,43 @@ func (s *AgentSightings) Flush(ctx context.Context) {
 	}
 }
 
-// Close stops the background flusher and sends what is waiting. Requests
-// served afterwards are not reported. It is safe to call more than once.
-func (s *AgentSightings) Close() error {
-	s.closeOnce.Do(func() {
-		close(s.stop)
-		if s.started() {
+// Shutdown stops the background flusher and sends what is waiting, giving up
+// when ctx is done: a batch in flight is then abandoned and what still waits
+// is not sent. Pass it the context you give http.Server.Shutdown, after the
+// server has stopped. Requests served afterwards are not reported.
+//
+// It returns ctx's error when it gave up, and nil otherwise; what the API
+// refused is reported to OnError, as always. It is safe to call more than
+// once and from several goroutines: later calls wait for the first and return
+// its result.
+func (s *AgentSightings) Shutdown(ctx context.Context) error {
+	s.closeOnce.Do(func() { s.closeErr = s.shutdown(ctx) })
+	return s.closeErr
+}
+
+func (s *AgentSightings) shutdown(ctx context.Context) error {
+	close(s.stop)
+	defer s.cancelLoop()
+	if s.started() {
+		select {
+		case <-s.done:
+		case <-ctx.Done():
+			s.cancelLoop()
 			<-s.done
 		}
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-		s.Flush(context.Background())
-	})
+	}
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.Flush(ctx)
+	return ctx.Err()
+}
+
+// Close is Shutdown without a deadline of its own: it stops the background
+// flusher and sends what is waiting, each batch within its 5 second deadline,
+// stopping at the first batch the API does not take. It always returns nil.
+func (s *AgentSightings) Close() error {
+	_ = s.Shutdown(context.Background())
 	return nil
 }
 
@@ -523,21 +556,43 @@ func (s *AgentSightings) start() {
 // waiting for 2 seconds. A goroutine never keeps a Go program alive, so
 // nothing more is needed for it to end with the process.
 func (s *AgentSightings) loop() {
-	defer close(s.done)
 	ticker := time.NewTicker(sightingsTick)
 	defer ticker.Stop()
+	s.loopWith(ticker.C)
+}
+
+// loopWith is loop on the given ticks, which tests supply.
+func (s *AgentSightings) loopWith(ticks <-chan time.Time) {
+	defer close(s.done)
 	for {
 		select {
 		case <-s.stop:
 			return
-		case <-ticker.C:
+		case <-ticks:
 		case <-s.wake:
+		}
+		// select picks at random among ready cases, so a tick or a wake
+		// ready alongside stop must not start another batch: Shutdown is
+		// waiting, and sends what is left itself.
+		if s.stopping() {
+			return
 		}
 		s.flushDue()
 	}
 }
 
-// flushDue sends batches while one is due, unless a flush is in flight.
+// stopping reports whether Shutdown has begun.
+func (s *AgentSightings) stopping() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// flushDue sends batches while one is due, unless a flush is in flight or
+// Shutdown has begun.
 func (s *AgentSightings) flushDue() {
 	select {
 	case s.flushing <- struct{}{}:
@@ -545,7 +600,7 @@ func (s *AgentSightings) flushDue() {
 		return
 	}
 	defer func() { <-s.flushing }()
-	for s.flushBatch(context.Background(), true) {
+	for !s.stopping() && s.flushBatch(s.loopCtx, true) {
 	}
 }
 

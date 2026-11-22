@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	fingerly "github.com/fingerly-io/fingerly-go"
@@ -209,7 +211,6 @@ func ExampleNewAgentSightings() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer sightings.Close()
 
 	site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		answer := sightings.Lookup(r)
@@ -220,7 +221,21 @@ func ExampleNewAgentSightings() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, "<!doctype html><title>Shop</title>")
 	})
-	log.Fatal(http.ListenAndServe(":8080", sightings.Middleware(site)))
+	server := &http.Server{Addr: ":8080", Handler: sightings.Middleware(site)}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	// On SIGTERM, stop serving, then send what is still waiting.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdown)
+	_ = sightings.Shutdown(shutdown)
 }
 
 func enqueue(id string, body []byte) {}
