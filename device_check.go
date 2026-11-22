@@ -10,13 +10,14 @@ import (
 	"time"
 )
 
-// DeviceCheckService spends the Apple DeviceCheck token that Fingerly holds
-// for an iOS event, for one hour after the identification, to read or to
+// DeviceCheckService spends the Apple DeviceCheck tokens that Fingerly holds
+// for an iOS event, for one hour after the identification, to read and to
 // write the device's two bits. Reach it as client.DeviceCheck.
 //
-// Apple treats a token as single-use: each held token pays for one call, a
-// read or a write, never both. To read and then mark a device, read on one
-// identification and write on the next.
+// Apple treats a token as single-use, so an event holds a read token and a
+// write token, and each pays for one call: Query spends the read token, Write
+// the write token. To read and then mark a device, read and write with the
+// same request id.
 type DeviceCheckService struct {
 	client *Client
 }
@@ -57,7 +58,7 @@ var deviceCheckRetryDelays = []time.Duration{250 * time.Millisecond, time.Second
 // retry.
 const maxDeviceCheckRetryAfter = 5 * time.Second
 
-// Query spends the event's held token to read the device's two bits.
+// Query spends the event's held read token to read the device's two bits.
 //
 // Errors match ErrDeviceCheckNotHeld, ErrDeviceCheckSpent,
 // ErrDeviceCheckBusy, ErrCredentialUnavailable, ErrAppleRejected or
@@ -78,8 +79,8 @@ func (s *DeviceCheckService) Query(ctx context.Context, requestID string) (*Devi
 	return &bits, nil
 }
 
-// Write spends the event's held token to set bit0, bit1 or both. A write
-// naming neither bit returns ErrBitsRequired without sending anything.
+// Write spends the event's held write token to set bit0, bit1 or both. A
+// write naming neither bit returns ErrBitsRequired without sending anything.
 //
 // Errors are the same as for Query, plus ErrBitsRequired. A 503 or a call
 // that got no complete answer is retried, with the identical request, up to

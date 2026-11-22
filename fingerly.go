@@ -31,7 +31,7 @@ const (
 type Client struct {
 	// Events reads stored events under this client's secret key.
 	Events *EventsService
-	// DeviceCheck spends an iOS event's held DeviceCheck token to read or
+	// DeviceCheck spends an iOS event's held DeviceCheck tokens to read and
 	// write the device's two bits.
 	DeviceCheck *DeviceCheckService
 	// Agents reports the requests your server served and answers what sent

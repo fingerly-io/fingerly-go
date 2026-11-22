@@ -145,10 +145,11 @@ var ErrInvalidVerifyOptions = errors.New("fingerly: invalid verify options")
 // write naming neither bit returns before anything is sent.
 var (
 	// ErrDeviceCheckNotHeld (404 device_check_not_held): no token is held for
-	// that event. Not a verdict: decide without the bits.
+	// that call. Not a verdict: decide without the bits.
 	ErrDeviceCheckNotHeld = errors.New("fingerly: no device check token is held for that event")
-	// ErrDeviceCheckSpent (409 device_check_spent): the token was already
-	// used, or this call is not the request the token was first used for.
+	// ErrDeviceCheckSpent (409 device_check_spent): the call's token was
+	// already used, a read's by a read or a write's by a write, or this call
+	// is not the request the token was first used for.
 	ErrDeviceCheckSpent = errors.New("fingerly: the event's device check token was already used")
 	// ErrDeviceCheckBusy (409 device_check_busy): another call is using the
 	// token right now.

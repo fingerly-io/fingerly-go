@@ -87,16 +87,17 @@ func ExampleAPIError() {
 	fmt.Println(verdict)
 }
 
-// A once-per-device free trial on iOS spends two identifications, because
-// Apple treats each DeviceCheck token as single-use: read the bits on the
-// identification that asks for the trial, record the grant in your own data,
-// then write the bit on the device's next identification.
+// A once-per-device free trial on iOS reads and writes on the identification
+// that asks for the trial, because it holds a read token and a write token:
+// read the bits, record the grant in your own data, then write the bit with
+// the same request id.
 func ExampleDeviceCheckService_Query() {
 	client := fingerly.New(os.Getenv("FINGERLY_SECRET_KEY"))
 	ctx := context.Background()
+	requestID := "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4"
 
-	// 1. The identification that asks for the trial.
-	bits, err := client.DeviceCheck.Query(ctx, "01a0a84b-e6a2-7c09-9f51-0b3d7a26c8e4")
+	// 1. Read the bits.
+	bits, err := client.DeviceCheck.Query(ctx, requestID)
 	switch {
 	case errors.Is(err, fingerly.ErrDeviceCheckNotHeld), errors.Is(err, fingerly.ErrDeviceCheckSpent):
 		// No answer, not a verdict: decide on your own records alone.
@@ -109,8 +110,8 @@ func ExampleDeviceCheckService_Query() {
 	// 2. Grant the trial and record it in your own data, with the device
 	// not yet marked.
 
-	// 3. The next identification from that install marks the device.
-	if _, err := client.DeviceCheck.Write(ctx, "01a0a84b-f1c3-7d10-8a62-1c4e8b37d9f5",
+	// 3. Mark the device with the same request id.
+	if _, err := client.DeviceCheck.Write(ctx, requestID,
 		fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)}); err != nil {
 		// Keep the device unmarked and write again on a later identification.
 		log.Print(err)

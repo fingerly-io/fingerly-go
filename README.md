@@ -305,7 +305,7 @@ if errors.As(err, &consumed) {
 
 ## DeviceCheck bits on iOS
 
-When DeviceCheck is turned on for the project's Apple key, Fingerly holds the Apple DeviceCheck token of an iOS identification for one hour. `client.DeviceCheck` spends it, once, to read or to write the two bits Apple keeps for the device. The bits survive a reinstall and mean what you decide.
+When DeviceCheck is turned on for the project's Apple key, Fingerly holds two Apple DeviceCheck tokens of an iOS identification for one hour, a read token and a write token. `client.DeviceCheck` spends each once: `Query` the read token to read the two bits Apple keeps for the device, `Write` the write token to set them. The bits survive a reinstall and mean what you decide.
 
 ```go
 bits, err := client.DeviceCheck.Query(ctx, requestID)
@@ -314,17 +314,17 @@ bits, err := client.DeviceCheck.Query(ctx, requestID)
 _, err = client.DeviceCheck.Write(ctx, requestID, fingerly.DeviceCheckWrite{Bit0: fingerly.Bool(true)})
 ```
 
-Apple treats a DeviceCheck token as single-use, so a read and a write each need their own identification. A once-per-device free trial takes two:
+Apple treats a DeviceCheck token as single-use, so one identification supports one read and one write. A once-per-device free trial does both on the identification that asks for the trial:
 
-1. On the identification that asks for the trial, call `Query`. If the bits say the device already had one, refuse it.
+1. Call `Query`. If the bits say the device already had one, refuse it.
 2. Otherwise grant the trial and record the grant in your own data, with the device not yet marked.
-3. On the next identification from that install (the app can identify again right after the grant), call `Write` with the bit, then mark the record. Until the write lands, your own record is what stops a second trial.
+3. Call `Write` with the bit and the same request ID, then mark the record. Until the write lands, your own record is what stops a second trial.
 
 Each answer has a sentinel for `errors.Is`; the concrete error is an `*APIError`:
 
 | Sentinel | Status and code | What to do |
 | --- | --- | --- |
-| `ErrDeviceCheckNotHeld` | `404 device_check_not_held` | No token for that event. Decide without the bits. |
+| `ErrDeviceCheckNotHeld` | `404 device_check_not_held` | No token for that call. Decide without the bits. |
 | `ErrDeviceCheckSpent` | `409 device_check_spent` | Already used, or not the request it was first used for. Use another identification. |
 | `ErrDeviceCheckBusy` | `409 device_check_busy` | Another call is using it. Retry in a moment. |
 | `ErrCredentialUnavailable` | `409 credential_unavailable` | Fix the Apple key, then retry within the hour. |
@@ -332,7 +332,7 @@ Each answer has a sentinel for `errors.Is`; the concrete error is an `*APIError`
 | `ErrAppleRejected` | `422 apple_rejected` | Apple rejected the token; `APIError.AppleStatus` holds Apple's HTTP status. |
 | `ErrDeviceCheckUnavailable` | `503 device_check_unavailable` | The token is kept. Retry the same call within the hour. |
 
-A retry must be the same request: while a token is kept after an answer that was not definite, the API accepts only the operation and bits it was first used for, and answers anything else with `device_check_spent`. The SDK retries a `503` or a call that got no complete answer up to twice, with the identical request, and nothing else. When you retry later yourself, repeat the same call with the same bits.
+A retry must be the same request: while a token is kept after an answer that was not definite, the API accepts only the call and bits it was first used for, and answers a second read, or a write with other bits, with `device_check_spent`. The SDK retries a `503` or a call that got no complete answer up to twice, with the identical request, and nothing else. When you retry later yourself, repeat the same call with the same bits.
 
 ## Verify webhooks
 
