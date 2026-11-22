@@ -1713,7 +1713,7 @@ func TestARetryAfterOverADayWaitsADay(t *testing.T) {
 	now := time.Date(2026, 11, 21, 23, 0, 0, 0, time.UTC)
 	// The larger of these overflowed a Duration: some paused reporting for
 	// years, and the largest waited a second, asking again every second.
-	for _, header := range []string{"86401", "99999999999", "99999999999999", "9223372036854775807"} {
+	for _, header := range []string{"86401", "99999999999", "99999999999999", "9223372036854775807", "99999999999999999999"} {
 		apiErr := &APIError{RetryAfter: parseRetryAfter(header, now)}
 		if got := retryWait(now, apiErr); got != 24*time.Hour {
 			t.Fatalf("Retry-After %q waits %s", header, got)

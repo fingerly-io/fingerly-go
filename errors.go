@@ -206,14 +206,15 @@ func (e *ConnectionError) Unwrap() error { return e.cause }
 func (e *ConnectionError) Is(target error) bool { return target == ErrTimeout && e.Timeout }
 
 // parseRetryAfter reads a Retry-After header as whole seconds: either a
-// number of seconds or an HTTP date, which counts from now. Anything else is
-// nil.
+// number of seconds or an HTTP date, which counts from now. A number too
+// large for an int is the largest int. Anything else is nil.
 func parseRetryAfter(value string, now time.Time) *int {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
+	// Atoi holds an out-of-range number at the bound it passed.
+	if seconds, err := strconv.Atoi(value); err == nil || errors.Is(err, strconv.ErrRange) {
 		if seconds < 0 {
 			return nil
 		}
