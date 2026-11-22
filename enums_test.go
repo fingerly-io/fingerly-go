@@ -23,6 +23,7 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalVirtualMachine):        "virtual_machine",
 		string(SignalJailbrokenDevice):      "jailbroken_device",
 		string(SignalRootedDevice):          "rooted_device",
+		string(SignalBootloaderUnlocked):    "bootloader_unlocked",
 		string(SignalClonedApp):             "cloned_app",
 		string(SignalDeviceFarm):            "device_farm",
 		string(SignalMITMAttack):            "mitm_attack",
@@ -86,8 +87,8 @@ func TestEnumWireValues(t *testing.T) {
 		string(SignalAttestationDowngrade):             "attestation_downgrade",
 		string(SignalProbeErrors):                      "probe_errors",
 	}
-	if len(cases) != 74 {
-		t.Errorf("%d distinct signal values, want 74: a constant duplicates another", len(cases))
+	if len(cases) != 75 {
+		t.Errorf("%d distinct signal values, want 75: a constant duplicates another", len(cases))
 	}
 	for got, want := range cases {
 		if got != want {
