@@ -183,6 +183,26 @@ func TestListSendsWindowBoundsInUTC(t *testing.T) {
 	}
 }
 
+func TestListKeepsTheWindowBoundsExact(t *testing.T) {
+	rec := newRecorder(t, respondJSON(http.StatusOK, map[string]any{
+		"rows": []any{}, "page": 1, "page_size": 10,
+	}))
+	// to is exclusive: cut to the second, the events of its last second
+	// would be left out.
+	to := time.Date(2026, 9, 1, 8, 30, 0, 750_000_000, time.UTC)
+	params := &EventListParams{From: to.Add(-time.Hour), To: to}
+	if _, err := testClient(rec).Events.List(context.Background(), params); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	query := rec.requests[0].URL.Query()
+	if got := query.Get("to"); got != "2026-09-01T08:30:00.75Z" {
+		t.Errorf("to is %q", got)
+	}
+	if got := query.Get("from"); got != "2026-09-01T07:30:00.75Z" {
+		t.Errorf("from is %q", got)
+	}
+}
+
 // A missing event is a request id that was never issued or is past
 // retention. It is reported at once, in one request, rather than waited
 // through.

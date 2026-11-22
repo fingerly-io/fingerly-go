@@ -76,10 +76,10 @@ func (p *EventListParams) query() string {
 	}
 	values := url.Values{}
 	if !p.From.IsZero() {
-		values.Set("from", p.From.UTC().Format(time.RFC3339))
+		values.Set("from", p.From.UTC().Format(time.RFC3339Nano))
 	}
 	if !p.To.IsZero() {
-		values.Set("to", p.To.UTC().Format(time.RFC3339))
+		values.Set("to", p.To.UTC().Format(time.RFC3339Nano))
 	}
 	if p.Page > 0 {
 		values.Set("page", strconv.Itoa(p.Page))
