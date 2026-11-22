@@ -33,6 +33,7 @@ const (
 	SignalVirtualMachine        Signal = "virtual_machine"
 	SignalJailbrokenDevice      Signal = "jailbroken_device"
 	SignalRootedDevice          Signal = "rooted_device"
+	SignalBootloaderUnlocked    Signal = "bootloader_unlocked"
 	SignalClonedApp             Signal = "cloned_app"
 	SignalDeviceFarm            Signal = "device_farm"
 	SignalMITMAttack            Signal = "mitm_attack"
